@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <time.h>
 #include <string.h>
+#include <stdbool.h>
+#include <poll.h>
 
 const int PORT = 8080;
 
@@ -18,6 +20,10 @@ typedef struct
     int client_fd;
     int score;
 } Player;
+
+Player *playerQueue[4];
+bool matchmakingDone = false;
+pthread_mutex_t lock;
 
 // Opens score file
 void *load_score(void *arg)
@@ -54,13 +60,67 @@ void *load_score(void *arg)
         }
     }
     fclose(file);
+
+    return NULL;
 }
+
+void *pollForDisconnect(void *arg)
+{
+
+    while (!matchmakingDone)
+    {
+
+        struct pollfd poller[4];
+
+        // avoid race conditions/incorrect read
+        pthread_mutex_lock(&lock);
+        int *playerCount = (int *)arg;
+        int count = *playerCount;
+        pthread_mutex_unlock(&lock);
+        for (int i = 0; i < count; i++)
+        {
+            pthread_mutex_lock(&lock);
+            poller[i].fd = playerQueue[i]->client_fd;
+            pthread_mutex_unlock(&lock);
+            poller[i].events = POLLIN;
+        }
+
+        int check = poll(poller, count, 100);
+
+        if (check > 0)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                if (poller[i].revents & POLLIN)
+                {
+                    char buf;
+                    ssize_t n = recv(poller[i].fd, &buf, 1, MSG_PEEK);
+
+                    if (n == 0)
+                    {
+                        close(poller[i].fd);
+                        pthread_mutex_lock(&lock);
+                        printf("Player %s disconnected\n", playerQueue[i]->name);
+                        free(playerQueue[i]);
+                        // shift a player to fill in that player's pos and remove last item of the array
+                        // Why? Because C is so old that there is no better solutions I guess
+                        // Well there was one that involved doing some iteration but that just makes everything slower no?
+                        playerQueue[i] = playerQueue[count - 1];
+                        *playerCount--;
+                        pthread_mutex_unlock(&lock);
+                    }
+                }
+            }
+        }
+    }
+
+    return NULL;
+}
+
 int main()
 {
-    Player *playerQueue[4];
+    pthread_mutex_init(&lock, NULL);
     int playerCount = 0;
-    // Socket stuff here
-    // if new players join
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
     if (server_fd < 0)
@@ -81,9 +141,13 @@ int main()
     printf("Server listening on port 6013\n");
 
     pthread_t scoreLoader;
-
+    pthread_t checkForDisconnects;
+    pthread_create(&checkForDisconnects, NULL, pollForDisconnect, &playerCount);
+    pthread_detach(checkForDisconnects);
+    pthread_mutex_lock(&lock);
     while (playerCount < 4)
     {
+        pthread_mutex_unlock(&lock);
         int clientfd;
         clientfd = accept(server_fd, NULL, NULL);
         if (clientfd == -1)
@@ -110,6 +174,7 @@ int main()
                 strncpy(newPlayer->name, buffer, sizeof(newPlayer->name) - 1);
                 newPlayer->client_fd = clientfd;
                 newPlayer->score = 0;
+                pthread_mutex_lock(&lock);
                 playerQueue[playerCount] = newPlayer;
                 playerCount++;
                 pthread_create(&scoreLoader, NULL, load_score, newPlayer);
@@ -117,6 +182,8 @@ int main()
             }
         }
     }
+    pthread_mutex_unlock(&lock);
+    matchmakingDone = true;
 
     for (int i = 0; i < playerCount; i++)
     {
