@@ -1,29 +1,4 @@
-// Anis and Zi Xuan's part
-#include <stdio.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-
-int main()
-{
-    // connect to server
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in serv_addr = {0};
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(6013);
-    inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr);
-    connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr));
-    printf("Connected\n");
-    char buffer[50] = "Shawn";
-    write(sockfd, buffer, sizeof(buffer));
-    sleep(1000);
-    close(sockfd);
-    return 0;
-}
-
-
-//zx: only 1 player and fixed demo enemy ship not yet set for other players
+//only 1 player and fixed demo enemy ship not yet set for other players
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -105,8 +80,8 @@ void printGameBoards(char** enemyView, char** playerBoard) {
 
 int shipPosition(char** board, int row, int col, int length, char dir) {
     for (int i = 0; i < length; i++) {
-        int r = row + (dir == 'v' ? i : 0); //vertical
-        int c = col + (dir == 'h' ? i : 0); //horizontal
+        int r = row + (dir == 'v' ? i : 0);
+        int c = col + (dir == 'h' ? i : 0);
         if (r >= SIZE || c >= SIZE || board[r][c] != WATER)
             return 0;
     }
