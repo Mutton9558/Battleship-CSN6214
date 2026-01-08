@@ -11,19 +11,64 @@
 #include <string.h>
 #include <stdbool.h>
 #include <poll.h>
+#include <sys/wait.h>
 
 const int PORT = 8080;
 
 typedef struct
 {
+    int x;
+    int y;
+} Tuple;
+
+// typedef struct {
+//     Tuple shipPos[5];
+// } Ship;
+
+// typedef struct{
+//     char name[4];
+//     Ship ships[4]
+// } Team;
+
+typedef enum
+{
+    BLUE,
+    RED
+} teamList;
+
+typedef struct
+{
     char name[50];
+    teamList team;
     int client_fd;
     int score;
 } Player;
 
+typedef struct
+{
+    Player *curTurnPlayer;
+    Tuple hitTarget;
+    bool shipDestroyed;
+    bool shipHit;
+    bool gameEnd;
+    Player *playersDisconnected[4];
+} turnState;
+
+enum threadList
+{
+    HANDLER,
+    SCHEDULER,
+    LOGGER
+};
+
+enum threadList threadTurn = HANDLER;
+
 Player *playerQueue[4];
+turnState gameState;
 bool matchmakingDone = false;
 pthread_mutex_t lock;
+pthread_mutex_t turnStructLock;
+pthread_cond_t turnStructConditionVar;
 
 // Opens score file
 void *load_score(void *arg)
@@ -36,6 +81,7 @@ void *load_score(void *arg)
         if (!file)
         {
             printf("Error in creating score file");
+            exit(0);
         }
         else
         {
@@ -61,6 +107,15 @@ void *load_score(void *arg)
     }
     fclose(file);
 
+    FILE *logFile = fopen("game.log", "a");
+    if (!logFile)
+    {
+        printf("Error in opening log file");
+        exit(0);
+    }
+    fprintf("Player %s joined.\n", player->name);
+    fprintf("Player %s assigned team %s.\n", player->team);
+
     return NULL;
 }
 
@@ -85,7 +140,9 @@ void *pollForDisconnect(void *arg)
             poller[i].events = POLLIN;
         }
 
-        int check = poll(poller, count, 100);
+        // waits for 1s, if no event returns 0
+        // not so fun fact i set the timeout to 0 and almost destroyed my linux - shawn
+        int check = poll(poller, count, 1000);
 
         if (check > 0)
         {
@@ -100,11 +157,9 @@ void *pollForDisconnect(void *arg)
                     {
                         close(poller[i].fd);
                         pthread_mutex_lock(&lock);
-                        printf("Player %s disconnected\n", playerQueue[i]->name);
+                        printf("Player %s disconnected...\n", playerQueue[i]->name);
                         free(playerQueue[i]);
                         // shift a player to fill in that player's pos and remove last item of the array
-                        // Why? Because C is so old that there is no better solutions I guess
-                        // Well there was one that involved doing some iteration but that just makes everything slower no?
                         playerQueue[i] = playerQueue[count - 1];
                         *playerCount--;
                         pthread_mutex_unlock(&lock);
@@ -117,9 +172,117 @@ void *pollForDisconnect(void *arg)
     return NULL;
 }
 
+// void *disconnectMidGame(void *arg)
+// {
+//     bool *gameEnd = (bool *)arg;
+//     while (!(*gameEnd))
+//         ;
+//     printf("Game ending\n");
+//     return NULL;
+// }
+
+// void *clientHandling(void *arg)
+// {
+//     bool gameEnd = false;
+//     pid_t threadPid = getpid();
+//     pid_t clientSessions[4];
+//     bool turnEnd = false;
+//     bool validStart = false;
+//     Player *curPlayer = gameState.curTurnPlayer;
+
+//     int n = sizeof(playerQueue) / sizeof(playerQueue[0]);
+//     for (int i = 0; i < n; i++)
+//     {
+//         if (getpid() == threadPid)
+//         {
+//             pid_t pid = fork();
+//             if (pid < 0)
+//             {
+//                 printf("Error making client session for player %s", playerQueue[i]->name);
+//                 exit(0);
+//             }
+//             else if (pid != threadPid)
+//             {
+//                 clientSessions[i] = pid;
+//                 // create pipe also
+//             }
+//         }
+//     }
+
+//     pid_t curPid = getpid();
+
+//     while (!gameEnd)
+//     {
+
+//         if (curPid == threadPid)
+//         {
+//             // parent
+
+//             pthread_mutex_lock(&turnStructLock);
+//             while (threadTurn != HANDLER)
+//             {
+//                 pthread_cond_wait(&turnStructConditionVar, &turnStructLock);
+//             }
+//             curPlayer = gameState.curTurnPlayer;
+//             pthread_mutex_unlock(&turnStructLock);
+
+//             // handles if user disconnected during logger + scheduler thread execution
+
+//             validStart = true;
+
+//             while (!turnEnd)
+//             {
+//                 sleep(1);
+//             }
+//             validStart = false;
+//             // read from all pipes and see if there are msgs in the pipe
+//             pthread_mutex_lock(&turnStructLock);
+//             // change turnStruct
+//             threadTurn = LOGGER;
+//             pthread_mutex_unlock(&turnStructLock);
+//         }
+//         else
+//         {
+//             while (!validStart)
+//                 ;
+//             // child
+//             int n = sizeof(clientSessions) / sizeof(clientSessions[0]);
+//             Player *associatedPlayer;
+
+//             for (int i = 0; i < n; i++)
+//             {
+//                 if (curPid == clientSessions[i])
+//                 {
+//                     associatedPlayer = playerQueue[i];
+//                 }
+//                 if (associatedPlayer == curPlayer)
+//                 {
+//                     // tcp write to indicate current turn
+//                     // then blocking read to wait for respond
+//                     // at the meantime create thread to listen for disconnect
+//                     turnEnd = true;
+//                     sleep(1);
+//                 }
+//                 else
+//                 {
+//                     // tcp write to indicate not their turn
+//                     while (!turnEnd)
+//                     {
+//                         sleep(1);
+//                     }
+//                     // poll for disconnects
+//                     sleep(1);
+//                 }
+//             }
+//         }
+//     }
+// }
+
 int main()
 {
     pthread_mutex_init(&lock, NULL);
+    pthread_mutex_init(&turnStructLock, NULL);
+    pthread_cond_init(&turnStructConditionVar, NULL);
     int playerCount = 0;
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -140,8 +303,25 @@ int main()
 
     printf("Server listening on port 6013\n");
 
+    FILE *file = fopen("game.log", "a");
+    if (!file)
+    {
+        printf("Error in opening log file");
+        exit(0);
+    }
+
+    fprintf(file, "\n========================\n");
+    fprintf(file, "New Game...\n");
+    fprintf(file, "Match Loading...\n");
+    fclose(file);
+
+    // all the threads
     pthread_t scoreLoader;
     pthread_t checkForDisconnects;
+    pthread_t schedulerThread;
+    pthread_t clientHandlerThread;
+    pthread_t loggerThread;
+
     pthread_create(&checkForDisconnects, NULL, pollForDisconnect, &playerCount);
     pthread_detach(checkForDisconnects);
     pthread_mutex_lock(&lock);
@@ -174,6 +354,14 @@ int main()
                 strncpy(newPlayer->name, buffer, sizeof(newPlayer->name) - 1);
                 newPlayer->client_fd = clientfd;
                 newPlayer->score = 0;
+                if (playerCount % 2 == 0)
+                {
+                    strncpy(newPlayer->team, BLUE, sizeof(BLUE) - 1);
+                }
+                else
+                {
+                    strncpy(newPlayer->team, RED, sizeof(RED) - 1);
+                }
                 pthread_mutex_lock(&lock);
                 playerQueue[playerCount] = newPlayer;
                 playerCount++;
@@ -184,6 +372,7 @@ int main()
     }
     pthread_mutex_unlock(&lock);
     matchmakingDone = true;
+    pthread_mutex_destroy(&lock);
 
     for (int i = 0; i < playerCount; i++)
     {
@@ -191,6 +380,7 @@ int main()
         free(playerQueue[i]);
     }
     close(server_fd);
+    pthread_mutex_destroy(&turnStructLock);
 
     return 0;
 }
