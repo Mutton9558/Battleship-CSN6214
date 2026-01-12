@@ -1,4 +1,6 @@
 // Shawn and Imran's part
+#define _POSIX_C_SOURCE 200809L
+#include <signal.h>
 #include <stdio.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -12,6 +14,8 @@
 #include <stdbool.h>
 #include <poll.h>
 #include <sys/wait.h>
+#include <sys/mman.h>
+#include <errno.h>
 
 const int PORT = 8080;
 
@@ -41,6 +45,7 @@ typedef struct
     char name[50];
     teamList team;
     int client_fd;
+    int playerId;
     int score;
 } Player;
 
@@ -61,14 +66,53 @@ enum threadList
     LOGGER
 };
 
-enum threadList threadTurn = HANDLER;
+enum threadList threadTurn = SCHEDULER;
+
+typedef struct
+{
+    enum threadList threadTurn;
+    pthread_mutex_t turnStructLock;
+    pthread_cond_t turnStructCond;
+    turnState gameState;
+    bool turnDone;
+} SharedData;
 
 Player *playerQueue[4];
 turnState gameState;
-bool matchmakingDone = false;
+bool gameEnd = false;
+bool gameStart = false;
 pthread_mutex_t lock;
 pthread_mutex_t turnStructLock;
 pthread_cond_t turnStructConditionVar;
+int pipes[4][2];
+
+void sigchld_handler(int sig)
+{
+    int saved_errno = errno;
+    pid_t pid;
+    int status;
+
+    // Reap all exited children
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0)
+    {
+        printf("Child %d exited\n", pid);
+    }
+
+    errno = saved_errno;
+}
+
+void setup_sigchld()
+{
+    struct sigaction sa;
+    sa.sa_handler = sigchld_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP; // restart interrupted syscalls
+    if (sigaction(SIGCHLD, &sa, NULL) == -1)
+    {
+        perror("sigaction");
+        exit(1);
+    }
+}
 
 // Opens score file
 void *load_score(void *arg)
@@ -113,16 +157,42 @@ void *load_score(void *arg)
         printf("Error in opening log file");
         exit(0);
     }
-    fprintf("Player %s joined.\n", player->name);
-    fprintf("Player %s assigned team %s.\n", player->team);
+    char team[5];
+    if (player->team == BLUE)
+    {
+        strncpy(team, "Blue", sizeof("Blue"));
+    }
+    else
+    {
+        strncpy(team, "Red", sizeof("Red"));
+    }
+    fprintf(logFile, "Player %s joined.\n", player->name);
+    fprintf(logFile, "Player %s assigned team %s.\n", player->name, team);
 
+    fclose(logFile);
+    return NULL;
+}
+
+void *updateFileDisconnect(void *arg)
+{
+    char *name = (char *)arg;
+    FILE *logFile = fopen("game.log", "a");
+    if (!logFile)
+    {
+        printf("Error in opening log file");
+        free(name);
+        exit(0);
+    }
+    fprintf(logFile, "PLayer %s disconnected.\n", name);
+    fclose(logFile);
+    free(name);
     return NULL;
 }
 
 void *pollForDisconnect(void *arg)
 {
-
-    while (!matchmakingDone)
+    pthread_t fileManipThread;
+    while (!gameEnd)
     {
 
         struct pollfd poller[4];
@@ -157,11 +227,15 @@ void *pollForDisconnect(void *arg)
                     {
                         close(poller[i].fd);
                         pthread_mutex_lock(&lock);
-                        printf("Player %s disconnected...\n", playerQueue[i]->name);
+                        char *name = malloc(strlen(playerQueue[i]->name) + 1);
+                        strcpy(name, playerQueue[i]->name);
+                        printf("Player %s disconnected...\n", name);
+                        pthread_create(&fileManipThread, NULL, updateFileDisconnect, name);
+                        pthread_detach(fileManipThread);
                         free(playerQueue[i]);
                         // shift a player to fill in that player's pos and remove last item of the array
-                        playerQueue[i] = playerQueue[count - 1];
-                        *playerCount--;
+                        playerQueue[i] = NULL;
+                        (*playerCount)--;
                         pthread_mutex_unlock(&lock);
                     }
                 }
@@ -172,111 +246,7 @@ void *pollForDisconnect(void *arg)
     return NULL;
 }
 
-// void *disconnectMidGame(void *arg)
-// {
-//     bool *gameEnd = (bool *)arg;
-//     while (!(*gameEnd))
-//         ;
-//     printf("Game ending\n");
-//     return NULL;
-// }
-
-// void *clientHandling(void *arg)
-// {
-//     bool gameEnd = false;
-//     pid_t threadPid = getpid();
-//     pid_t clientSessions[4];
-//     bool turnEnd = false;
-//     bool validStart = false;
-//     Player *curPlayer = gameState.curTurnPlayer;
-
-//     int n = sizeof(playerQueue) / sizeof(playerQueue[0]);
-//     for (int i = 0; i < n; i++)
-//     {
-//         if (getpid() == threadPid)
-//         {
-//             pid_t pid = fork();
-//             if (pid < 0)
-//             {
-//                 printf("Error making client session for player %s", playerQueue[i]->name);
-//                 exit(0);
-//             }
-//             else if (pid != threadPid)
-//             {
-//                 clientSessions[i] = pid;
-//                 // create pipe also
-//             }
-//         }
-//     }
-
-//     pid_t curPid = getpid();
-
-//     while (!gameEnd)
-//     {
-
-//         if (curPid == threadPid)
-//         {
-//             // parent
-
-//             pthread_mutex_lock(&turnStructLock);
-//             while (threadTurn != HANDLER)
-//             {
-//                 pthread_cond_wait(&turnStructConditionVar, &turnStructLock);
-//             }
-//             curPlayer = gameState.curTurnPlayer;
-//             pthread_mutex_unlock(&turnStructLock);
-
-//             // handles if user disconnected during logger + scheduler thread execution
-
-//             validStart = true;
-
-//             while (!turnEnd)
-//             {
-//                 sleep(1);
-//             }
-//             validStart = false;
-//             // read from all pipes and see if there are msgs in the pipe
-//             pthread_mutex_lock(&turnStructLock);
-//             // change turnStruct
-//             threadTurn = LOGGER;
-//             pthread_mutex_unlock(&turnStructLock);
-//         }
-//         else
-//         {
-//             while (!validStart)
-//                 ;
-//             // child
-//             int n = sizeof(clientSessions) / sizeof(clientSessions[0]);
-//             Player *associatedPlayer;
-
-//             for (int i = 0; i < n; i++)
-//             {
-//                 if (curPid == clientSessions[i])
-//                 {
-//                     associatedPlayer = playerQueue[i];
-//                 }
-//                 if (associatedPlayer == curPlayer)
-//                 {
-//                     // tcp write to indicate current turn
-//                     // then blocking read to wait for respond
-//                     // at the meantime create thread to listen for disconnect
-//                     turnEnd = true;
-//                     sleep(1);
-//                 }
-//                 else
-//                 {
-//                     // tcp write to indicate not their turn
-//                     while (!turnEnd)
-//                     {
-//                         sleep(1);
-//                     }
-//                     // poll for disconnects
-//                     sleep(1);
-//                 }
-//             }
-//         }
-//     }
-// }
+void clientHandler(SharedData *shared, Player *player, int pipefd[2]) {}
 
 int main()
 {
@@ -319,11 +289,10 @@ int main()
     pthread_t scoreLoader;
     pthread_t checkForDisconnects;
     pthread_t schedulerThread;
-    pthread_t clientHandlerThread;
     pthread_t loggerThread;
 
     pthread_create(&checkForDisconnects, NULL, pollForDisconnect, &playerCount);
-    pthread_detach(checkForDisconnects);
+
     pthread_mutex_lock(&lock);
     while (playerCount < 4)
     {
@@ -352,16 +321,18 @@ int main()
 
                 Player *newPlayer = malloc(sizeof(Player));
                 strncpy(newPlayer->name, buffer, sizeof(newPlayer->name) - 1);
+                newPlayer->playerId = playerCount;
                 newPlayer->client_fd = clientfd;
                 newPlayer->score = 0;
                 if (playerCount % 2 == 0)
                 {
-                    strncpy(newPlayer->team, BLUE, sizeof(BLUE) - 1);
+                    newPlayer->team = BLUE;
                 }
                 else
                 {
-                    strncpy(newPlayer->team, RED, sizeof(RED) - 1);
+                    newPlayer->team = RED;
                 }
+                write(clientfd, &newPlayer->playerId, sizeof(newPlayer->playerId));
                 pthread_mutex_lock(&lock);
                 playerQueue[playerCount] = newPlayer;
                 playerCount++;
@@ -371,16 +342,120 @@ int main()
         }
     }
     pthread_mutex_unlock(&lock);
-    matchmakingDone = true;
-    pthread_mutex_destroy(&lock);
+
+    // Initialise shared memory
+
+    SharedData *shared = mmap(
+        NULL,
+        sizeof(SharedData),
+        PROT_READ | PROT_WRITE,
+        MAP_SHARED | MAP_ANONYMOUS,
+        -1,
+        0);
+
+    if (shared == MAP_FAILED)
+    {
+        printf("Error creating Shared Memory");
+        exit(1);
+    }
+
+    pthread_mutexattr_t turnStateLock;
+    pthread_condattr_t turnStateCond;
+
+    pthread_mutexattr_init(&turnStateLock);
+    pthread_mutexattr_setpshared(&turnStateLock, PTHREAD_PROCESS_SHARED);
+
+    pthread_condattr_init(&turnStateCond);
+    pthread_condattr_setpshared(&turnStateCond, PTHREAD_PROCESS_SHARED);
+
+    pthread_mutex_init(&shared->turnStructLock, &turnStateLock);
+    pthread_cond_init(&shared->turnStructCond, &turnStateCond);
+    shared->threadTurn = threadTurn;
+    shared->gameState = gameState;
+
+    // Create client handlers
+
+    pid_t parent = getpid();
+    setup_sigchld();
 
     for (int i = 0; i < playerCount; i++)
     {
-        close(playerQueue[i]->client_fd);
-        free(playerQueue[i]);
+        if (pipe(pipes[playerQueue[i]->playerId]) == -1)
+        {
+            printf("Error creating pipe");
+            exit(1);
+        }
+        if (getpid() == parent)
+        {
+            pid_t pid = fork();
+
+            if (pid == 0)
+            {
+                clientHandler(shared, playerQueue[i], pipes[playerQueue[i]->playerId]);
+                exit(0);
+            }
+        }
+    }
+
+    gameStart = true;
+    while (!gameEnd)
+    {
+        pthread_mutex_lock(&shared->turnStructLock);
+        while (shared->threadTurn != HANDLER)
+        {
+            pthread_cond_wait(&shared->turnStructCond, &shared->turnStructLock);
+        }
+        Player *currentPlayer = (shared->gameState).curTurnPlayer;
+        teamList curTeam = currentPlayer->team;
+        pthread_mutex_unlock(&shared->turnStructLock);
+        typedef struct
+        {
+            bool disconnected;
+            Tuple target;
+        } msg;
+        msg message;
+        // waiting sleep
+        // if player disconnects, disconnect poll thread will write into this instead
+        read(pipes[currentPlayer->playerId][0], &message, sizeof(message));
+
+        // change gameState
+        // should probably also clear a disconnect arr or something
+
+        pthread_mutex_lock(&shared->turnStructLock);
+        shared->threadTurn = LOGGER;
+        pthread_mutex_unlock(&shared->turnStructLock);
+        pthread_cond_broadcast(&shared->turnStructCond);
+    }
+
+    sleep(3);
+
+    // stop polling for disconnects
+    gameEnd = true;
+    pthread_mutex_destroy(&lock);
+    pthread_mutexattr_destroy(&turnStateLock);
+    pthread_condattr_destroy(&turnStateCond);
+    pthread_detach(checkForDisconnects);
+
+    for (int i = 0; i < playerCount; i++)
+    {
+        if (playerQueue[i] != NULL)
+        {
+            close(playerQueue[i]->client_fd);
+            free(playerQueue[i]);
+        }
     }
     close(server_fd);
+
+    file = fopen("game.log", "a");
+    if (!file)
+    {
+        printf("Error in opening log file");
+        exit(0);
+    }
+    fprintf(file, "Game End");
+
     pthread_mutex_destroy(&turnStructLock);
+    pthread_cond_destroy(&turnStructConditionVar);
 
     return 0;
 }

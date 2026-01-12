@@ -6,8 +6,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-
-
+#include <stdbool.h>
 
 #define SIZE 7
 #define WATER '.'
@@ -19,7 +18,6 @@
 #define PHASE_WAITING 0
 #define MSG_PLACE_SHIP 2
 
-
 // networking
 int sockfd;
 int my_player_id;
@@ -27,27 +25,30 @@ int game_phase;
 int current_turn;
 
 // simple messages (client side)
-typedef struct {
+typedef struct
+{
     int row;
     int col;
 } AttackMsg;
 
-    typedef struct {
-    int msg_type;   // e.g., MSG_PLACE_SHIP = 2
-    char ship_id;   // 'a', 'b', 'c', 'd'
+typedef struct
+{
+    int msg_type; // e.g., MSG_PLACE_SHIP = 2
+    char ship_id; // 'a', 'b', 'c', 'd'
     int row;
     int col;
-    char dir;       // 'h' or 'v'
+    char dir; // 'h' or 'v'
 } PlaceShipMsg;
 
-typedef struct {
+typedef struct
+{
     int hit;       // 1 hit, 0 miss
     int sunk;      // 1 sunk, 0 no
     int game_over; // 1 yes, 0 no
 } ResultMsg;
 
-
-typedef struct {
+typedef struct
+{
     char symbol;
     int length;
 } Ship;
@@ -56,12 +57,13 @@ Ship ships[] = {
     {'a', 2},
     {'b', 3},
     {'c', 4},
-    {'d', 5}
-};
+    {'d', 5}};
 
-char** createBoard() {
-    char** board = malloc(SIZE * sizeof(char*));
-    for (int i = 0; i < SIZE; i++) {
+char **createBoard()
+{
+    char **board = malloc(SIZE * sizeof(char *));
+    for (int i = 0; i < SIZE; i++)
+    {
         board[i] = malloc(SIZE * sizeof(char));
         for (int j = 0; j < SIZE; j++)
             board[i][j] = WATER;
@@ -69,17 +71,20 @@ char** createBoard() {
     return board;
 }
 
-void clearScreen() {
+void clearScreen()
+{
     system("clear");
 }
 
-void printTaBoard(char** board) {
+void printTaBoard(char **board)
+{
     printf("  ");
     for (int c = 0; c < SIZE; c++)
         printf("%d ", c);
     printf("\n");
 
-    for (int r = 0; r < SIZE; r++) {
+    for (int r = 0; r < SIZE; r++)
+    {
         printf("%c ", 'A' + r);
         for (int c = 0; c < SIZE; c++)
             printf("%c ", board[r][c]);
@@ -87,15 +92,18 @@ void printTaBoard(char** board) {
     }
 }
 
-void printTbBoard(char** board) {
+void printTbBoard(char **board)
+{
     printf("  ");
     for (int c = 0; c < SIZE; c++)
         printf("%d ", c);
     printf("\n");
 
-    for (int r = 0; r < SIZE; r++) {
+    for (int r = 0; r < SIZE; r++)
+    {
         printf("%c ", 'A' + r);
-        for (int c = 0; c < SIZE; c++) {
+        for (int c = 0; c < SIZE; c++)
+        {
             if (board[r][c] == HIT || board[r][c] == MISS)
                 printf("%c ", board[r][c]);
             else
@@ -105,35 +113,41 @@ void printTbBoard(char** board) {
     }
 }
 
-void printGameBoards(char** enemyView, char** playerBoard) {
+void printGameBoards(char **enemyView, char **playerBoard)
+{
     printf("\n\n====== ENEMY BOARD ======\n");
     printTbBoard(enemyView);
     printf("\n====== YOUR BOARD ======\n");
     printTaBoard(playerBoard);
 }
 
-int shipPosition(char** board, int row, int col, int length, char dir) {
-    for (int i = 0; i < length; i++) {
-        int r = row + (dir == 'v' ? i : 0); //vertical
-        int c = col + (dir == 'h' ? i : 0); //horizontal
+int shipPosition(char **board, int row, int col, int length, char dir)
+{
+    for (int i = 0; i < length; i++)
+    {
+        int r = row + (dir == 'v' ? i : 0); // vertical
+        int c = col + (dir == 'h' ? i : 0); // horizontal
         if (r >= SIZE || c >= SIZE || board[r][c] != WATER)
             return 0;
     }
     return 1;
 }
 
-
-void placeShip(char** board, Ship ship, int *out_row, int *out_col, char *out_dir) {
+void placeShip(char **board, Ship ship, int *out_row, int *out_col, char *out_dir)
+{
 
     char input[10];
-    while (1) {
-        clearScreen(); 
+    while (1)
+    {
+        clearScreen();
         printTaBoard(board);
         printf("\nPlacing ship %c (length %d)\n", ship.symbol, ship.length);
         printf("Enter row (A-G), column (0-6), direction (h/v) [e.g., A0h]: ");
-        if (!fgets(input, sizeof(input), stdin)) continue;
+        if (!fgets(input, sizeof(input), stdin))
+            continue;
 
-        if (strlen(input) < 3 || input[2] == '\n') {
+        if (strlen(input) < 3 || input[2] == '\n')
+        {
             printf("\nHmm, that doesn't look right. Try again.\n\n");
             sleep(1);
             continue;
@@ -143,7 +157,8 @@ void placeShip(char** board, Ship ship, int *out_row, int *out_col, char *out_di
         char colChar = input[1];
         char dir = tolower(input[2]);
 
-        if (!isdigit(colChar)) {
+        if (!isdigit(colChar))
+        {
             printf("\nColumns are numbers. Not letters. Give it another shot.\n\n");
             sleep(1);
             continue;
@@ -152,14 +167,17 @@ void placeShip(char** board, Ship ship, int *out_row, int *out_col, char *out_di
         int row = rowChar - 'A';
         int col = colChar - '0';
 
-        if (row < 0 || row >= SIZE || col < 0 || col >= SIZE || (dir != 'h' && dir != 'v')) {
+        if (row < 0 || row >= SIZE || col < 0 || col >= SIZE || (dir != 'h' && dir != 'v'))
+        {
             printf("\nThat won't fit. Pick a better spot.\n\n");
             sleep(1);
             continue;
         }
 
-        if (shipPosition(board, row, col, ship.length, dir)) {
-            for (int i = 0; i < ship.length; i++) {
+        if (shipPosition(board, row, col, ship.length, dir))
+        {
+            for (int i = 0; i < ship.length; i++)
+            {
                 int r = row + (dir == 'v' ? i : 0);
                 int c = col + (dir == 'h' ? i : 0);
                 board[r][c] = ship.symbol;
@@ -170,16 +188,19 @@ void placeShip(char** board, Ship ship, int *out_row, int *out_col, char *out_di
             *out_dir = dir;
 
             printf("\nNice! Ship '%c' is in place.\n\n", ship.symbol);
-            sleep(1); 
+            sleep(1);
             break;
-        } else {
+        }
+        else
+        {
             printf("\nSpot is taken or out of bounds. Try another one.\n\n");
             sleep(1);
         }
     }
 }
 
-void hitTarget(char** enemyView, char** playerBoard) {
+void hitTarget(char **enemyView, char **playerBoard)
+{
     char input[10];
     int row, col;
 
@@ -189,7 +210,8 @@ void hitTarget(char** enemyView, char** playerBoard) {
     printf("\nEnter target (A-G)(0-6): ");
     fgets(input, sizeof(input), stdin);
 
-    if (strlen(input) < 2) return;
+    if (strlen(input) < 2)
+        return;
 
     row = toupper(input[0]) - 'A';
     col = input[1] - '0';
@@ -220,8 +242,10 @@ void hitTarget(char** enemyView, char** playerBoard) {
     sleep(2);
 }
 
-void waitForTurn() {
-    while (1) {
+void waitForTurn()
+{
+    while (1)
+    {
         // Blocking read: server sends current_turn when turn changes
         read(sockfd, &current_turn, sizeof(int));
         if (current_turn == my_player_id)
@@ -231,34 +255,59 @@ void waitForTurn() {
     }
 }
 
-int main() {
-    char** playerBoard = createBoard();
-    char** enemyBoardView = createBoard();
+int main()
+{
+    char **playerBoard = createBoard();
+    char **enemyBoardView = createBoard();
 
     struct sockaddr_in serv_addr = {0};
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
+    if (sockfd < 0)
+    {
         perror("Socket creation failed");
         exit(1);
     }
 
     serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(6013);              // server port
-    inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr);  // server IP
+    serv_addr.sin_port = htons(6013);                     // server port
+    inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr); // server IP
 
-    if (connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
+    if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
+    {
         perror("Connection failed");
         exit(1);
     }
-    
+    // get user's name
+    char name[50];
+    printf("Enter your name\n");
+    fgets(name, sizeof(name), stdin);
+    name[strcspn(name, "\r\n")] = '\0';
+    write(sockfd, name, sizeof(name));
+
+    // retrieve id from server
     read(sockfd, &my_player_id, sizeof(my_player_id));
     printf("Connected to server as player %d\n", my_player_id);
 
-     int row, col;
+    bool gameStart = false;
+    // idle client until game starts
+    // leave commented until production
+    printf("Waiting for more players...\n");
+    ssize_t n = read(sockfd, &gameStart, sizeof(gameStart));
+
+    if (n <= 0)
+    {
+        printf("Server might be down or inactive...\n");
+        printf("We apologise for the inconvenience\n");
+        close(sockfd);
+        exit(0);
+    }
+
+    int row, col;
     char dir;
-    
-    for (int i = 0; i < sizeof(ships)/sizeof(ships[0]); i++) {
-       
+
+    for (int i = 0; i < sizeof(ships) / sizeof(ships[0]); i++)
+    {
+
         placeShip(playerBoard, ships[i], &row, &col, &dir);
 
         PlaceShipMsg msg;
@@ -271,27 +320,29 @@ int main() {
         write(sockfd, &msg, sizeof(msg));
     }
 
-    
     clearScreen();
 
-while (1) {
-    read(sockfd, &game_phase, sizeof(int));
-    if (game_phase == PHASE_PLACEMENT) {
-        // placement already done earlier
-    }
-    else if (game_phase == PHASE_PLAYING) {
-        waitForTurn();
-        hitTarget(enemyBoardView, playerBoard);
-    }
-    else if (game_phase == PHASE_GAME_OVER) {
-        printf("Game Over!\n");
-        break;
+    while (1)
+    {
+        read(sockfd, &game_phase, sizeof(int));
+        if (game_phase == PHASE_PLACEMENT)
+        {
+            // placement already done earlier
+        }
+        else if (game_phase == PHASE_PLAYING)
+        {
+            waitForTurn();
+            hitTarget(enemyBoardView, playerBoard);
+        }
+        else if (game_phase == PHASE_GAME_OVER)
+        {
+            printf("Game Over!\n");
+            break;
+        }
     }
 
-}
-
-
-    for (int i = 0; i < SIZE; i++) {
+    for (int i = 0; i < SIZE; i++)
+    {
         free(playerBoard[i]);
         free(enemyBoardView[i]);
     }
