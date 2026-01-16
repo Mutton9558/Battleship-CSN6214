@@ -17,6 +17,10 @@
 #include <sys/mman.h>
 #include <errno.h>
 
+#define PHASE_PLACEMENT 1
+#define PHASE_PLAYING 2
+#define PHASE_GAME_OVER 3
+
 const int PORT = 8080;
 
 typedef struct
@@ -24,15 +28,6 @@ typedef struct
     int x;
     int y;
 } Tuple;
-
-// typedef struct {
-//     Tuple shipPos[5];
-// } Ship;
-
-// typedef struct{
-//     char name[4];
-//     Ship ships[4]
-// } Team;
 
 typedef enum
 {
@@ -56,7 +51,6 @@ typedef struct
     bool shipDestroyed;
     bool shipHit;
     bool gameEnd;
-    Player *playersDisconnected[4];
 } turnState;
 
 enum threadList
@@ -75,9 +69,13 @@ typedef struct
     pthread_cond_t turnStructCond;
     turnState gameState;
     bool turnDone;
+    char blueShips[7][7];
+    char redShips[7][7];
 } SharedData;
 
+// global variables
 Player *playerQueue[4];
+char disconnectedPlayers[4][50];
 turnState gameState;
 bool gameEnd = false;
 bool gameStart = false;
@@ -85,6 +83,8 @@ pthread_mutex_t lock;
 pthread_mutex_t turnStructLock;
 pthread_cond_t turnStructConditionVar;
 int pipes[4][2];
+int disconnectPipe[2];
+int gamePhase = PHASE_PLACEMENT;
 
 void sigchld_handler(int sig)
 {
@@ -248,6 +248,30 @@ void *pollForDisconnect(void *arg)
 
 void clientHandler(SharedData *shared, Player *player, int pipefd[2]) {}
 
+void updateGameState(SharedData *shared)
+{
+    //     typedef struct
+    // {
+    //     enum threadList threadTurn;
+    //     pthread_mutex_t turnStructLock;
+    //     pthread_cond_t turnStructCond;
+    //     turnState gameState;
+    //     bool turnDone;
+    //     char blueShips[7][7];
+    //     char redShips[7][7];
+    // } SharedData;
+
+    // typedef struct
+    // {
+    //     Player *curTurnPlayer;
+    //     Tuple hitTarget;
+    //     bool shipDestroyed;
+    //     bool shipHit;
+    //     bool gameEnd;
+    // }
+    // turnState;
+}
+
 int main()
 {
     pthread_mutex_init(&lock, NULL);
@@ -372,18 +396,30 @@ int main()
     pthread_cond_init(&shared->turnStructCond, &turnStateCond);
     shared->threadTurn = threadTurn;
     shared->gameState = gameState;
+    memset(shared->redShips, 0, sizeof shared->redShips);
+    memset(shared->blueShips, 0, sizeof shared->blueShips);
 
     // Create client handlers
 
     pid_t parent = getpid();
     setup_sigchld();
 
+    typedef struct
+    {
+        bool disconnected;
+        int msg_type; // e.g., MSG_PLACE_SHIP = 2
+        char ship_id; // 'a', 'b', 'c', 'd'
+        int row;
+        int col;
+        char dir; // 'h' or 'v'
+    } msg;
+
     for (int i = 0; i < playerCount; i++)
     {
         if (pipe(pipes[playerQueue[i]->playerId]) == -1)
         {
             printf("Error creating pipe");
-            exit(1);
+            exit(0);
         }
         if (getpid() == parent)
         {
@@ -397,7 +433,14 @@ int main()
         }
     }
 
+    if (pipe(disconnectPipe) == -1)
+    {
+        printf("Error creating disconnect pipe");
+        exit(0);
+    }
+    // inform disconnect thread that the game started
     gameStart = true;
+
     while (!gameEnd)
     {
         pthread_mutex_lock(&shared->turnStructLock);
@@ -407,23 +450,91 @@ int main()
         }
         Player *currentPlayer = (shared->gameState).curTurnPlayer;
         teamList curTeam = currentPlayer->team;
+        int id = currentPlayer->playerId;
+        int n = playerCount;
         pthread_mutex_unlock(&shared->turnStructLock);
-        typedef struct
+        for (int i = 0; i < n; i++)
         {
-            bool disconnected;
-            Tuple target;
-        } msg;
-        msg message;
-        // waiting sleep
-        // if player disconnects, disconnect poll thread will write into this instead
-        read(pipes[currentPlayer->playerId][0], &message, sizeof(message));
+            // inform children of whose turn it is
+            // should send board info to players (children's job)
+            write(pipes[playerQueue[i]->playerId][1], currentPlayer, sizeof(currentPlayer));
+        }
+
+        switch (gamePhase)
+        {
+        case PHASE_PLACEMENT:
+            msg placementMessage;
+
+            // disconnect thread will also check for phases to send different "poison pipe messages"
+            read(pipes[id][0], &placementMessage, sizeof(placementMessage));
+
+            // if player disconnected
+            if (placementMessage.disconnected)
+            {
+                pthread_mutex_lock(&shared->turnStructLock);
+                shared->gameState.hitTarget.x = -1;
+                shared->gameState.hitTarget.y = -1;
+                shared->gameState.shipHit = false;
+                shared->gameState.shipDestroyed = false;
+                shared->gameState.gameEnd = false;
+                shared->threadTurn = LOGGER;
+                pthread_mutex_unlock(&shared->turnStructLock);
+                pthread_cond_broadcast(&shared->turnStructCond);
+                continue;
+            }
+
+            int length = placementMessage.ship_id - 'a' + 2;
+            char (*targetArr)[7];
+            switch (curTeam)
+            {
+            case RED:
+                targetArr = shared->redShips;
+                break;
+            case BLUE:
+                targetArr = shared->blueShips;
+                break;
+            default:
+                printf("Invalid Team");
+                exit(0);
+            }
+
+            if (placementMessage.dir != 'v' && placementMessage.dir != 'h')
+            {
+                printf("Invalid direction");
+                exit(0);
+            }
+
+            int col, row;
+            for (int p = 0; p < length; p++)
+            {
+
+                col = placementMessage.col + p * (placementMessage.dir == 'h');
+                row = placementMessage.row + p * (placementMessage.dir == 'v');
+
+                if (targetArr[row][col] != '\0')
+                {
+                    printf("Invalid operation");
+                }
+                else
+                {
+                    targetArr[row][col] = placementMessage.ship_id;
+                }
+            }
+
+            break;
+        case PHASE_PLAYING:
+            break;
+        case PHASE_GAME_OVER:
+            break;
+        default:
+            printf("Error, can't ascertain game state.");
+            exit(0);
+        }
 
         // change gameState
-        // should probably also clear a disconnect arr or something
+        // should probably also clear a disconnect arr or something <-- move to scheduler's responsibility
 
-        pthread_mutex_lock(&shared->turnStructLock);
         shared->threadTurn = LOGGER;
-        pthread_mutex_unlock(&shared->turnStructLock);
         pthread_cond_broadcast(&shared->turnStructCond);
     }
 
