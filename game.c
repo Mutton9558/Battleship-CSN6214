@@ -33,6 +33,7 @@ typedef struct
 
 typedef struct
 {
+    bool disconnected;
     int msg_type; // e.g., MSG_PLACE_SHIP = 2
     char ship_id; // 'a', 'b', 'c', 'd'
     int row;
@@ -311,6 +312,7 @@ int main()
         placeShip(playerBoard, ships[i], &row, &col, &dir);
 
         PlaceShipMsg msg;
+        msg.disconnected = false;
         msg.msg_type = MSG_PLACE_SHIP;
         msg.ship_id = ships[i].symbol;
         msg.row = row;
