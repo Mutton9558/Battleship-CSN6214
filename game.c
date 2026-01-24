@@ -303,33 +303,30 @@ int main()
         exit(0);
     }
 
-    int row, col;
-    char dir;
-
-    for (int i = 0; i < sizeof(ships) / sizeof(ships[0]); i++)
-    {
-
-        placeShip(playerBoard, ships[i], &row, &col, &dir);
-
-        PlaceShipMsg msg;
-        msg.disconnected = false;
-        msg.msg_type = MSG_PLACE_SHIP;
-        msg.ship_id = ships[i].symbol;
-        msg.row = row;
-        msg.col = col;
-        msg.dir = dir;
-
-        write(sockfd, &msg, sizeof(msg));
-    }
-
     clearScreen();
+
+    int teamShipCount;
 
     while (1)
     {
         read(sockfd, &game_phase, sizeof(int));
         if (game_phase == PHASE_PLACEMENT)
         {
-            // placement already done earlier
+            waitForTurn();
+            ssize_t n = read(sockfd, &teamShipCount, sizeof(int));
+            int row, col;
+            char dir;
+            placeShip(playerBoard, ships[teamShipCount], &row, &col, &dir);
+
+            PlaceShipMsg msg;
+            msg.disconnected = false;
+            msg.msg_type = MSG_PLACE_SHIP;
+            msg.ship_id = ships[teamShipCount].symbol;
+            msg.row = row;
+            msg.col = col;
+            msg.dir = dir;
+
+            write(sockfd, &msg, sizeof(msg));
         }
         else if (game_phase == PHASE_PLAYING)
         {
