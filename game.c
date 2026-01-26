@@ -77,6 +77,24 @@ void clearScreen()
     system("clear");
 }
 
+void recreateBoard(char **clientBoard, char serverBoard[SIZE][SIZE])
+{
+    for (int row = 0; row < SIZE; row++)
+    {
+        for (int col = 0; col < SIZE; col++)
+        {
+            if (serverBoard[row][col] == '\0')
+            {
+                clientBoard[row][col] = WATER;
+            }
+            else
+            {
+                clientBoard[row][col] = serverBoard[row][col];
+            }
+        }
+    }
+}
+
 void printTaBoard(char **board)
 {
     printf("  ");
@@ -309,6 +327,14 @@ int main()
 
     while (1)
     {
+        // get board
+        char teamServerBoard[7][7];
+        char enemyServerBoard[7][7];
+        read(sockfd, teamServerBoard, sizeof(teamServerBoard));
+        read(sockfd, enemyServerBoard, sizeof(enemyServerBoard));
+        recreateBoard(playerBoard, teamServerBoard);
+        recreateBoard(enemyBoardView, enemyServerBoard);
+
         read(sockfd, &game_phase, sizeof(int));
         if (game_phase == PHASE_PLACEMENT)
         {
