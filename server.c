@@ -73,6 +73,7 @@ typedef struct
     char redShips[7][7];
     int redShipCount;
     int blueShipCount;
+    int gamePhase;
 } SharedData;
 
 typedef struct
@@ -202,6 +203,7 @@ void *updateFileDisconnect(void *arg)
 void *pollForDisconnect(void *arg)
 {
     pthread_t fileManipThread;
+    int *playerCount = (int *)arg;
     while (!gameEnd)
     {
 
@@ -209,7 +211,7 @@ void *pollForDisconnect(void *arg)
 
         // avoid race conditions/incorrect read
         pthread_mutex_lock(&lock);
-        int *playerCount = (int *)arg;
+
         int count = *playerCount;
         pthread_mutex_unlock(&lock);
         for (int i = 0; i < count; i++)
@@ -262,7 +264,7 @@ void *pollForDisconnect(void *arg)
             }
         }
     }
-
+    free(playerCount);
     return NULL;
 }
 
@@ -276,32 +278,95 @@ void clientHandler(SharedData *shared, Player *player, int pipefd[2])
 
     int clientFd = player->client_fd;
     int id = player->playerId;
-    int curTurnPlayerId = &shared->gameState.curTurnPlayer->playerId;
+    while (shared->gameState.curTurnPlayer == NULL)
+    {
+        sleep(1);
+    }
+    pthread_mutex_unlock(&shared->turnStructLock);
+    teamList team = player->team;
+    teamList enemyTeam;
+    char myShip[7][7];
+    char enemyShip[7][7];
     write(clientFd, true, sizeof(bool));
+    if (team == RED)
+    {
+        enemyTeam == BLUE;
+        pthread_mutex_lock(&shared->turnStructLock);
+        memcpy(myShip, shared->redShips, sizeof(shared->redShips));
+        memcpy(enemyShip, shared->blueShips, sizeof(shared->blueShips));
+        pthread_mutex_unlock(&shared->turnStructLock);
+    }
+    else
+    {
+        enemyTeam == RED;
+        pthread_mutex_lock(&shared->turnStructLock);
+        memcpy(myShip, shared->blueShips, sizeof(shared->blueShips));
+        memcpy(enemyShip, shared->redShips, sizeof(shared->redShips));
+        pthread_mutex_unlock(&shared->turnStructLock);
+    }
 
     while (true)
     {
-        write(clientFd, &gamePhase, sizeof(gamePhase));
+        write(clientFd, myShip, sizeof(myShip));
+        write(clientFd, enemyShip, sizeof(enemyShip));
+        pthread_mutex_lock(&shared->turnStructLock);
+        write(clientFd, shared->gamePhase, sizeof(shared->gamePhase));
+        pthread_mutex_unlock(&shared->turnStructLock);
+        int curTurnPlayerId;
         do
         {
+            pthread_mutex_lock(&shared->turnStructLock);
+            curTurnPlayerId = shared->gameState.curTurnPlayer->playerId;
+            pthread_mutex_unlock(&shared->turnStructLock);
             write(clientFd, curTurnPlayerId, sizeof(curTurnPlayerId));
             sleep(1);
         } while (id != curTurnPlayerId);
 
-        int teamShipCount = (player->team == RED ? &shared->redShipCount : &shared->blueShipCount);
-
         msg clientMsg;
-        if(gamePhase == PHASE_PLACEMENT){
+        if (shared->gamePhase == PHASE_PLACEMENT)
+        {
+            pthread_mutex_lock(&shared->turnStructLock);
+            int teamShipCount = (player->team == RED ? shared->redShipCount : shared->blueShipCount);
+            pthread_mutex_unlock(&shared->turnStructLock);
             write(clientFd, teamShipCount, sizeof(teamShipCount));
-            
-            read(clientFd, &clientMsg, sizeof(msg));
+
+            ssize_t n = read(clientFd, &clientMsg, sizeof(msg));
+            if (n <= 0)
+            {
+                printf("Client disconnected\n");
+                exit(-1);
+            }
+        }
+        else if (shared->gamePhase == PHASE_GAME_OVER)
+        {
+            // kill child
+            exit(0);
         }
 
         write(pipes[id][1], &clientMsg, sizeof(clientMsg));
     }
 
-    pthread_mutex_unlock(&shared->turnStructLock);
     pthread_cond_broadcast(&shared->turnStructCond);
+}
+
+void loggerFunction(void *arg)
+{
+    SharedData *data = (SharedData *)arg;
+    if (data->gamePhase == PHASE_PLACEMENT)
+    {
+    }
+    else if (data->gamePhase == PHASE_PLAYING)
+    {
+    }
+    else if (data->gamePhase == PHASE_GAME_OVER)
+    {
+    }
+    else
+    {
+        printf("Invalid phase");
+        exit(-1);
+    }
+    free(data);
 }
 
 void updateGameState(SharedData *shared)
@@ -454,8 +519,12 @@ int main()
     shared->gameState = gameState;
     shared->redShipCount = 0;
     shared->blueShipCount = 0;
+    shared->gamePhase = gamePhase;
     memset(shared->redShips, 0, sizeof shared->redShips);
     memset(shared->blueShips, 0, sizeof shared->blueShips);
+
+    // threads
+    pthread_create(&loggerThread, NULL, loggerFunction, &shared);
 
     // Create client handlers
 
@@ -491,20 +560,14 @@ int main()
         {
             pthread_cond_wait(&shared->turnStructCond, &shared->turnStructLock);
         }
+        // get current player info
         Player *currentPlayer = (shared->gameState).curTurnPlayer;
         teamList curTeam = currentPlayer->team;
         int id = currentPlayer->playerId;
         int n = playerCount;
         pthread_mutex_unlock(&shared->turnStructLock);
-        for (int i = 0; i < n; i++)
-        {
-            int targetId = playerQueue[i]->playerId;
-            // inform children of whose turn it is
-            // should send board info to players (children's job)
-            write(pipes[targetId][1], currentPlayer, sizeof(currentPlayer));
-        }
 
-        if (gamePhase == PHASE_PLACEMENT)
+        if (shared->gamePhase == PHASE_PLACEMENT)
         {
 
             msg placementMessage;
@@ -513,6 +576,7 @@ int main()
             // disconnect thread will also check for phases to send different "poison pipe messages"
             read(pipes[id][0], &placementMessage, sizeof(placementMessage));
 
+            pthread_mutex_lock(&shared->turnStructLock);
             // if player disconnected
             if (placementMessage.disconnected)
             {
@@ -525,6 +589,8 @@ int main()
                 shared->threadTurn = LOGGER;
                 pthread_mutex_unlock(&shared->turnStructLock);
                 pthread_cond_broadcast(&shared->turnStructCond);
+                close(pipes[id][0]);
+                close(pipes[id][1]);
                 continue;
             }
 
@@ -544,6 +610,7 @@ int main()
                 printf("Invalid Team");
                 exit(0);
             }
+            pthread_mutex_unlock(&shared->turnStructLock);
 
             if (placementMessage.dir != 'v' && placementMessage.dir != 'h')
             {
@@ -566,22 +633,24 @@ int main()
                 else
                 {
                     targetArr[row][col] = placementMessage.ship_id;
+                    pthread_mutex_lock(&shared->turnStructLock);
                     curTeam == RED ? shared->redShipCount++ : shared->blueShipCount++;
+                    pthread_mutex_unlock(&shared->turnStructLock);
                 }
             }
             globalShipCount++;
             if (globalShipCount == 8)
             {
-                gamePhase = PHASE_PLAYING;
+                shared->gamePhase = PHASE_PLAYING;
             }
         }
-        else if (gamePhase == PHASE_PLAYING)
+        else if (shared->gamePhase == PHASE_PLAYING)
         {
-            // playing handling
+            // read from client handler
         }
-        else if (gamePhase == PHASE_GAME_OVER)
+        else if (shared->gamePhase == PHASE_GAME_OVER)
         {
-            // playing handling
+            // player handling
         }
         else
         {
