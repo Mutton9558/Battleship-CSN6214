@@ -24,13 +24,6 @@ int my_player_id;
 int game_phase;
 int current_turn;
 
-// simple messages (client side)
-typedef struct
-{
-    int row;
-    int col;
-} AttackMsg;
-
 typedef struct
 {
     bool disconnected;
@@ -39,13 +32,13 @@ typedef struct
     int row;
     int col;
     char dir; // 'h' or 'v'
-} PlaceShipMsg;
+} clientMsg;
 
 typedef struct
 {
-    int hit;       // 1 hit, 0 miss
-    int sunk;      // 1 sunk, 0 no
-    int game_over; // 1 yes, 0 no
+    bool hit;
+    bool sunk;
+    bool game_over;
 } ResultMsg;
 
 typedef struct
@@ -238,7 +231,7 @@ void hitTarget(char **enemyView, char **playerBoard)
     if (row < 0 || row >= SIZE || col < 0 || col >= SIZE)
         return;
 
-    AttackMsg attack;
+    clientMsg attack;
     attack.row = row;
     attack.col = col;
 
@@ -344,7 +337,7 @@ int main()
             char dir;
             placeShip(playerBoard, ships[teamShipCount], &row, &col, &dir);
 
-            PlaceShipMsg msg;
+            clientMsg msg;
             msg.disconnected = false;
             msg.msg_type = MSG_PLACE_SHIP;
             msg.ship_id = ships[teamShipCount].symbol;
