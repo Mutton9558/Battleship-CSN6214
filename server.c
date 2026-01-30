@@ -108,7 +108,7 @@ pthread_cond_t turnStructConditionVar;
 int pipes[4][2];
 int gamePhase = PHASE_PLACEMENT;
 
-void sigchld_handler(int sig)
+void sigchild_handler(int sig)
 {
     int saved_errno = errno;
     pid_t pid;
@@ -123,15 +123,16 @@ void sigchld_handler(int sig)
     errno = saved_errno;
 }
 
-void setup_sigchld()
+void setup_sigchild()
 {
     struct sigaction sa;
-    sa.sa_handler = sigchld_handler;
+    sa.sa_handler = sigchild_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP; // restart interrupted syscalls
+    // restart interrupted syscalls
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
     if (sigaction(SIGCHLD, &sa, NULL) == -1)
     {
-        perror("sigaction");
+        perror("sigaction\n");
         exit(1);
     }
 }
@@ -139,15 +140,14 @@ void setup_sigchld()
 // Opens score file
 void *load_score(void *arg)
 {
-    Player *player = malloc(sizeof(Player));
-    *player = *(Player *)arg;
+    Player *player = (Player *)arg;
     FILE *file = fopen("score.txt", "r");
     if (!file)
     {
         file = fopen("score.txt", "w");
         if (!file)
         {
-            printf("Error in creating score file");
+            printf("Error in creating score file\n");
             exit(0);
         }
         else
@@ -159,12 +159,12 @@ void *load_score(void *arg)
 
     // Username: Wins
     // max 50 for username, 2 for the colon and whitespace, 10 for max int digits
-    char line[62];
+    char line[63];
     int score;
-    char name[50];
-    while (fgets(line, 62, file))
+    char name[51];
+    while (fgets(line, 63, file))
     {
-        if (sscanf(line, "%[^:]: %d", name, &score) == 2)
+        if (sscanf(line, "%50[^:]: %d", name, &score) == 2)
         {
             if (strcmp(name, player->name) == 0)
             {
@@ -177,7 +177,7 @@ void *load_score(void *arg)
     FILE *logFile = fopen("game.log", "a");
     if (!logFile)
     {
-        printf("Error in opening log file");
+        printf("Error in opening log file\n");
         exit(0);
     }
     char team[5];
@@ -193,8 +193,56 @@ void *load_score(void *arg)
     fprintf(logFile, "Player %s assigned team %s.\n", player->name, team);
 
     fclose(logFile);
-    free(player);
     return NULL;
+}
+
+void *updateScore(void *arg)
+{
+    char winnerList[2][51] = arg;
+    FILE *tempFile = fopen("temp.txt", "w");
+    FILE *scoreFile = fopen("score.txt", "r");
+    if (!scoreFile)
+    {
+        printf("Error opening score file\n");
+    }
+    char line[63];
+    int score;
+    char name[51];
+    while (fgets(line, 63, scoreFile))
+    {
+        if (sscanf(line, "%50[^:]: %d", name, &score) == 2)
+        {
+            if (strcmp(name, winnerList[0]) == 0 || strcmp(name, winnerList[1]) == 0)
+            {
+                fprintf(tempFile, "%s: %d\n", name, score + 1);
+            }
+            else
+            {
+                fprintf(tempFile, "%s: %d\n", name, score);
+            }
+        }
+    }
+    fclose(tempFile);
+    fclose(scoreFile);
+
+    int fileRemoveSuccess = remove(scoreFile);
+    if (fileRemoveSuccess == 0)
+    {
+        int fileRenameSuccess = rename("temp.txt", "score.txt");
+        if (fileRenameSuccess == 0)
+        {
+            printf("Successfully updated score.txt\n");
+        }
+        else
+        {
+            printf("Failed to rename temp file!\n");
+        }
+    }
+    else
+    {
+        printf("Failed to remove score file!\n");
+    }
+    free(winnerList);
 }
 
 void *updateFileDisconnect(void *arg)
@@ -203,7 +251,7 @@ void *updateFileDisconnect(void *arg)
     FILE *logFile = fopen("game.log", "a");
     if (!logFile)
     {
-        printf("Error in opening log file");
+        printf("Error in opening log file\n");
         free(name);
         exit(0);
     }
@@ -411,14 +459,14 @@ void clientHandler(SharedData *shared, Player *player, int pipefd[2])
                 }
                 else
                 {
-                    printf("Target attempted to hit a space already hit before...");
+                    printf("Target attempted to hit a space already hit before...\n");
                 }
             }
         }
         else if (shared->gamePhase == PHASE_GAME_OVER)
         {
             // kill child
-            exit(0);
+            _exit(0);
         }
 
         write(pipefd[1], &clientMsg, sizeof(clientMsg));
@@ -441,46 +489,31 @@ void *loggerFunction(void *arg)
     }
     else
     {
-        printf("Invalid phase");
+        printf("Invalid phase\n");
         exit(-1);
     }
 }
 
-void updateGameState(SharedData *shared)
-{
-    //     typedef struct
-    // {
-    //     enum threadList threadTurn;
-    //     pthread_mutex_t turnStructLock;
-    //     pthread_cond_t turnStructCond;
-    //     turnState gameState;
-    //     bool turnDone;
-    //     char blueShips[7][7];
-    //     char redShips[7][7];
-    // } SharedData;
-
-    // typedef struct
-    // {
-    //     Player *curTurnPlayer;
-    //     Tuple hitTarget;
-    //     bool shipDestroyed;
-    //     bool shipHit;
-    //     bool gameEnd;
-    // }
-    // turnState;
-}
-
 int main()
 {
+    // mutex and condition variable initialisation
     pthread_mutex_init(&lock, NULL);
     pthread_mutex_init(&turnStructLock, NULL);
     pthread_cond_init(&turnStructConditionVar, NULL);
+
+    // all the threads
+    pthread_t scoreLoader;
+    pthread_t checkForDisconnects;
+    pthread_t schedulerThread;
+    pthread_t loggerThread;
+    pthread_t scoreUpdater;
+
     int playerCount = 0;
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
     if (server_fd < 0)
     {
-        printf("Failed to create socket");
+        printf("Failed to create socket\n");
         exit(0);
     }
 
@@ -498,7 +531,7 @@ int main()
     FILE *file = fopen("game.log", "a");
     if (!file)
     {
-        printf("Error in opening log file");
+        printf("Error in opening log file\n");
         exit(0);
     }
 
@@ -506,12 +539,6 @@ int main()
     fprintf(file, "New Game...\n");
     fprintf(file, "Match Loading...\n");
     fclose(file);
-
-    // all the threads
-    pthread_t scoreLoader;
-    pthread_t checkForDisconnects;
-    pthread_t schedulerThread;
-    pthread_t loggerThread;
 
     pthread_create(&checkForDisconnects, NULL, pollForDisconnect, &playerCount);
 
@@ -577,7 +604,7 @@ int main()
 
     if (shared == MAP_FAILED)
     {
-        printf("Error creating Shared Memory");
+        printf("Error creating Shared Memory\n");
         exit(1);
     }
 
@@ -606,13 +633,13 @@ int main()
     // Create client handlers
 
     pid_t parent = getpid();
-    setup_sigchld();
+    setup_sigchild();
 
     for (int i = 0; i < playerCount; i++)
     {
         if (pipe(pipes[playerQueue[i]->playerId]) == -1)
         {
-            printf("Error creating pipe");
+            printf("Error creating pipe\n");
             exit(0);
         }
         if (getpid() == parent)
@@ -662,10 +689,10 @@ int main()
             file = fopen("game.log", "a");
             if (!file)
             {
-                printf("Error in opening log file");
+                printf("Error in opening log file\n");
                 exit(0);
             }
-            fprintf(file, "All players disconnected.");
+            fprintf(file, "All players disconnected.\n");
             break;
         }
 
@@ -710,14 +737,14 @@ int main()
             }
             else
             {
-                printf("Invalid Team");
+                printf("Invalid Team\n");
                 exit(0);
             }
             pthread_mutex_unlock(&shared->turnStructLock);
 
             if (clientMessage.dir != 'v' && clientMessage.dir != 'h')
             {
-                printf("Invalid direction");
+                printf("Invalid direction\n");
                 exit(0);
             }
 
@@ -731,7 +758,7 @@ int main()
 
                 if (targetArr[row][col] != '\0')
                 {
-                    printf("Invalid operation");
+                    printf("Invalid operation\n");
                 }
                 else
                 {
@@ -765,13 +792,57 @@ int main()
         }
         else if (shared->gamePhase == PHASE_GAME_OVER)
         {
-            // write winners into file
+            pthread_mutex_unlock(&shared->turnStructLock);
+            char (*name)[51] = malloc(sizeof(char[2][51]));
+            short pCount = 0;
+            file = fopen("game.log", "a");
+            if (!file)
+            {
+                printf("Error in opening log file\n");
+                exit(0);
+            }
+
+            fprintf(file, "Winning team: %s \n", curTeam);
+            fprintf(file, "Winning players:\n");
+            pthread_mutex_lock(&lock);
+            for (int i = 0; i < playerCount; i++)
+            {
+                if (playerQueue[i]->team == curTeam)
+                {
+                    strcpy(name[pCount++], playerQueue[i]->name);
+                }
+            }
+            pthread_create(&scoreUpdater, NULL, updateScore, name);
+            for (int i = 0; i < playerCount; i++)
+            {
+                if (playerQueue[i]->team == curTeam)
+                {
+                    fprintf(file, "%s", playerQueue[i]->name);
+                    int closeStatus = close(pipes[playerQueue[i]->playerId][0]);
+                    if (closeStatus != 0)
+                    {
+                        printf("Error closing pipe for player %s\n", playerQueue[i]->name);
+                        continue;
+                    }
+
+                    int closeStatus = close(pipes[playerQueue[i]->playerId][1]);
+                    if (closeStatus != 0)
+                    {
+                        printf("Error closing pipe for player %s\n", playerQueue[i]->name);
+                        continue;
+                    }
+                }
+            }
+
+            pthread_mutex_unlock(&lock);
+            pthread_join(&scoreUpdater, NULL);
+            free(name);
             break;
         }
         else
         {
             pthread_mutex_unlock(&shared->turnStructLock);
-            printf("Error, can't ascertain game state.");
+            printf("Error, can't ascertain game state.\n");
             exit(0);
         }
 
@@ -780,8 +851,6 @@ int main()
         shared->threadTurn = LOGGER;
         pthread_cond_broadcast(&shared->turnStructCond);
     }
-
-    sleep(3);
 
     // stop polling for disconnects
     gameEnd = true;
@@ -804,10 +873,10 @@ int main()
     file = fopen("game.log", "a");
     if (!file)
     {
-        printf("Error in opening log file");
+        printf("Error in opening log file\n");
         exit(0);
     }
-    fprintf(file, "Game End");
+    fprintf(file, "Game End\n");
 
     pthread_mutex_destroy(&turnStructLock);
     pthread_cond_destroy(&turnStructConditionVar);
