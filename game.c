@@ -216,42 +216,59 @@ void hitTarget(char **enemyView, char **playerBoard)
     char input[10];
     int row, col;
 
-    clearScreen();
-    printGameBoards(enemyView, playerBoard);
+    while (1)
+    {
+        clearScreen();
+        printGameBoards(enemyView, playerBoard);
 
-    printf("\nEnter target (A-G)(0-6): ");
-    fgets(input, sizeof(input), stdin);
+        printf("\nEnter target (A-G)(0-6): ");
+        if (!fgets(input, sizeof(input), stdin))
+            continue;
 
-    if (strlen(input) < 2)
-        return;
+        if (strlen(input) < 2)
+        {
+            printf("\nInvalid input. Try again.\n");
+            sleep(1);
+            continue;
+        }
 
-    row = toupper(input[0]) - 'A';
-    col = input[1] - '0';
+        row = toupper(input[0]) - 'A';
+        col = input[1] - '0';
 
-    if (row < 0 || row >= SIZE || col < 0 || col >= SIZE)
-        return;
+        if (row < 0 || row >= SIZE || col < 0 || col >= SIZE)
+        {
+            printf("\nOut of bounds! Please choose A-G and 0-6.\n");
+            sleep(1);
+            continue;
+        }
 
-    clientMsg attack;
-    attack.row = row;
-    attack.col = col;
+        if (enemyView[row][col] == HIT || enemyView[row][col] == MISS)
+        {
+            printf("\nYou already attacked this position. Choose another.\n");
+            sleep(1);
+            continue;
+        }
 
-    write(sockfd, &attack, sizeof(attack));
+        clientMsg attack = {0};
+        attack.row = row;
+        attack.col = col;
 
-    ResultMsg result;
-    read(sockfd, &result, sizeof(result));
+        write(sockfd, &attack, sizeof(attack));
 
-    if (result.hit)
-        enemyView[row][col] = HIT;
-    else
-        enemyView[row][col] = MISS;
+        ResultMsg result;
+        read(sockfd, &result, sizeof(result));
 
-    if (result.sunk)
-        printf("\nShip sunk!\n");
+        enemyView[row][col] = result.hit ? HIT : MISS;
 
-    if (result.game_over)
-        printf("\nGame Over!\n");
+        if (result.sunk)
+            printf("\nShip sunk!\n");
 
-    sleep(2);
+        if (result.game_over)
+            printf("\nGame Over!\n");
+
+        sleep(2);
+        break;
+    }
 }
 
 void waitForTurn()
