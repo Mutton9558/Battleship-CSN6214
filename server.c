@@ -17,6 +17,11 @@
 #include <sys/mman.h>
 #include <errno.h>
 
+// Fix for macOS compatibility
+#ifndef MAP_ANONYMOUS
+#define MAP_ANONYMOUS MAP_ANON
+#endif
+
 #define HIT 'X'
 #define MISS 'O'
 #define PHASE_PLACEMENT 1
@@ -45,6 +50,12 @@ typedef struct
     int playerId;
     int score;
 } Player;
+
+typedef struct PlayerNode
+{
+    Player *player;
+    struct PlayerNode *next;
+} PlayerNode;
 
 typedef struct
 {
@@ -76,6 +87,9 @@ typedef struct
     int redShipCount;
     int blueShipCount;
     int gamePhase;
+    PlayerNode *playerQueueHead;
+    PlayerNode *currentPlayerNode;
+    int activePlayerCount;
 } SharedData;
 
 typedef struct
@@ -198,7 +212,7 @@ void *load_score(void *arg)
 
 void *updateScore(void *arg)
 {
-    char winnerList[2][51] = arg;
+    char (*winnerList)[51] = (char (*)[51])arg;
     FILE *tempFile = fopen("temp.txt", "w");
     FILE *scoreFile = fopen("score.txt", "r");
     if (!scoreFile)
@@ -225,7 +239,7 @@ void *updateScore(void *arg)
     fclose(tempFile);
     fclose(scoreFile);
 
-    int fileRemoveSuccess = remove(scoreFile);
+    int fileRemoveSuccess = remove("score.txt");
     if (fileRemoveSuccess == 0)
     {
         int fileRenameSuccess = rename("temp.txt", "score.txt");
@@ -362,7 +376,7 @@ void clientHandler(SharedData *shared, Player *player, int pipefd[2])
     write(clientFd, &gameStarted, sizeof(bool));
     if (team == RED)
     {
-        enemyTeam == BLUE;
+        enemyTeam = BLUE;
         pthread_mutex_lock(&shared->turnStructLock);
         memcpy(myShip, shared->redShips, sizeof(shared->redShips));
         memcpy(enemyShip, shared->blueShips, sizeof(shared->blueShips));
@@ -370,7 +384,7 @@ void clientHandler(SharedData *shared, Player *player, int pipefd[2])
     }
     else
     {
-        enemyTeam == RED;
+        enemyTeam = RED;
         pthread_mutex_lock(&shared->turnStructLock);
         memcpy(myShip, shared->blueShips, sizeof(shared->blueShips));
         memcpy(enemyShip, shared->redShips, sizeof(shared->redShips));
@@ -464,50 +478,99 @@ void *loggerFunction(void *arg)
 {
     SharedData *data = (SharedData *)arg;
     pthread_mutex_lock(&data->turnStructLock);
+
     while (data->threadTurn != LOGGER)
     {
         pthread_cond_wait(&data->turnStructCond, &data->turnStructLock);
     }
 
+    FILE *logFile = fopen("game.log", "a");
+    if (!logFile)
+    {
+        printf("Error opening game.log for logging\n");
+        pthread_mutex_unlock(&data->turnStructLock);
+        return NULL;
+    }
+
     while (!gameEnd)
     {
-        if (data->gamePhase == PHASE_PLACEMENT)
+        // Wait for LOGGER turn
+        while (data->threadTurn != LOGGER && !gameEnd)
         {
-            pthread_mutex_unlock(&data->turnStructLock);
-            // DEEP COPY SPECIFIC LOG INFO
-            // INFO UP TO YOU IMRAN
-            // You could make a log queue of items to be logged actually
+            pthread_cond_wait(&data->turnStructCond, &data->turnStructLock);
         }
-        else if (data->gamePhase == PHASE_PLAYING)
-        {
-            pthread_mutex_unlock(&data->turnStructLock);
-            // DEEP COPY SPECIFIC LOG INFO
-            // INFO UP TO YOU IMRAN
-            // You could make a log queue of items to be logged actually
-        }
-        else if (data->gamePhase == PHASE_GAME_OVER)
-        {
-            pthread_mutex_unlock(&data->turnStructLock);
-            // DEEP COPY SPECIFIC LOG INFO
-            // INFO UP TO YOU IMRAN
-            // You could make a log queue of items to be logged actually
-        }
-        else
-        {
-            pthread_mutex_unlock(&data->turnStructLock);
-            printf("Invalid phase\n");
-            exit(-1);
-        }
-        data->threadTurn = SCHEDULER;
 
-        // I/O Stuff Here
+        if (gameEnd)
+        {
+            pthread_mutex_unlock(&data->turnStructLock);
+            fclose(logFile);
+            break;
+        }
+
+        // Read and log turn state data
+        Player *currentPlayer = data->gameState.curTurnPlayer;
+        Tuple hitTarget = data->gameState.hitTarget;
+        bool shipHit = data->gameState.shipHit;
+        bool shipDestroyed = data->gameState.shipDestroyed;
+        int currentPhase = data->gamePhase;
+
+        pthread_mutex_unlock(&data->turnStructLock);
+
+        // Write data to log file
+        fprintf(logFile, "---Turn Log Entry---\n");
+        if (currentPlayer != NULL)
+        {
+            fprintf(logFile, "Current Turn Player: %s (Team: %s, ID: %d)\n",
+                    currentPlayer->name,
+                    currentPlayer->team == BLUE ? "BLUE" : "RED",
+                    currentPlayer->playerId);
+        }
+
+        fprintf(logFile, "Game Phase: ");
+        switch (currentPhase)
+        {
+        case PHASE_PLACEMENT:
+            fprintf(logFile, "PLACEMENT\n");
+            break;
+        case PHASE_PLAYING:
+            fprintf(logFile, "PLAYING\n");
+            fprintf(logFile, "Target: (%d, %d)\n", hitTarget.x, hitTarget.y);
+            fprintf(logFile, "Ship Hit: %s\n", shipHit ? "YES" : "NO");
+            fprintf(logFile, "Ship Destroyed: %s\n", shipDestroyed ? "YES" : "NO");
+            break;
+        case PHASE_GAME_OVER:
+            fprintf(logFile, "GAME_OVER\n");
+            break;
+        default:
+            fprintf(logFile, "UNKNOWN\n");
+        }
+        fprintf(logFile, "---End Entry---\n\n");
+        fflush(logFile);
+
+        pthread_mutex_lock(&data->turnStructLock);
+
+        // Signal scheduler that logger has finished accessing turnState
+        data->threadTurn = SCHEDULER;
+        pthread_cond_broadcast(&data->turnStructCond);
+
+        // Wait for next turn
+        while (data->threadTurn == SCHEDULER && !gameEnd)
+        {
+            pthread_cond_wait(&data->turnStructCond, &data->turnStructLock);
+        }
     }
+
+    if (logFile)
+        fclose(logFile);
+
+    return NULL;
 }
 
 void *schedulerFunction(void *arg)
 {
     SharedData *data = (SharedData *)arg;
     pthread_mutex_lock(&data->turnStructLock);
+
     while (data->threadTurn != SCHEDULER)
     {
         pthread_cond_wait(&data->turnStructCond, &data->turnStructLock);
@@ -515,26 +578,80 @@ void *schedulerFunction(void *arg)
 
     while (!gameEnd)
     {
-        if (data->gamePhase == PHASE_PLACEMENT)
+        // Wait for SCHEDULER turn
+        while (data->threadTurn != SCHEDULER && !gameEnd)
+        {
+            pthread_cond_wait(&data->turnStructCond, &data->turnStructLock);
+        }
+
+        if (gameEnd)
         {
             pthread_mutex_unlock(&data->turnStructLock);
+            break;
         }
-        else if (data->gamePhase == PHASE_PLAYING)
+
+        // Clear the turn state for the new turn
+        data->gameState.hitTarget.x = -1;
+        data->gameState.hitTarget.y = -1;
+        data->gameState.shipHit = false;
+        data->gameState.shipDestroyed = false;
+        data->gameState.gameEnd = false;
+
+        // Select next player's turn from the linked list
+        if (data->playerQueueHead != NULL)
         {
-            pthread_mutex_unlock(&data->turnStructLock);
+            if (data->currentPlayerNode == NULL)
+            {
+                // First time, start with head
+                data->currentPlayerNode = data->playerQueueHead;
+            }
+            else
+            {
+                // Move to next player in circular linked list
+                if (data->currentPlayerNode->next != NULL)
+                {
+                    data->currentPlayerNode = data->currentPlayerNode->next;
+                }
+                else
+                {
+                    // Wrap around to head
+                    data->currentPlayerNode = data->playerQueueHead;
+                }
+            }
+
+            // Check if current player has been disconnected
+            // If disconnected, move to next
+            while (data->currentPlayerNode && data->currentPlayerNode->player == NULL)
+            {
+                if (data->currentPlayerNode->next != NULL)
+                {
+                    data->currentPlayerNode = data->currentPlayerNode->next;
+                }
+                else
+                {
+                    data->currentPlayerNode = data->playerQueueHead;
+                }
+            }
+
+            if (data->currentPlayerNode && data->currentPlayerNode->player != NULL)
+            {
+                data->gameState.curTurnPlayer = data->currentPlayerNode->player;
+            }
         }
-        else if (data->gamePhase == PHASE_GAME_OVER)
-        {
-            pthread_mutex_unlock(&data->turnStructLock);
-        }
-        else
-        {
-            pthread_mutex_unlock(&data->turnStructLock);
-            printf("Invalid phase\n");
-            exit(-1);
-        }
+
+        // Signal client handler that turn state is cleared and new player selected
         data->threadTurn = HANDLER;
+        pthread_cond_broadcast(&data->turnStructCond);
+
+        // Wait for next turn to begin
+        while (data->threadTurn == HANDLER && !gameEnd)
+        {
+            pthread_cond_wait(&data->turnStructCond, &data->turnStructLock);
+        }
     }
+
+    pthread_mutex_unlock(&data->turnStructLock);
+    return NULL;
 }
 
 int main()
@@ -672,11 +789,38 @@ int main()
     shared->redShipCount = 0;
     shared->blueShipCount = 0;
     shared->gamePhase = gamePhase;
+    shared->activePlayerCount = playerCount;
     memset(shared->redShips, 0, sizeof shared->redShips);
     memset(shared->blueShips, 0, sizeof shared->blueShips);
 
+    // Initialize circular linked list of players
+    PlayerNode *prevNode = NULL;
+    for (int i = 0; i < playerCount; i++)
+    {
+        PlayerNode *newNode = malloc(sizeof(PlayerNode));
+        newNode->player = playerQueue[i];
+        newNode->next = NULL;
+
+        if (i == 0)
+        {
+            shared->playerQueueHead = newNode;
+        }
+        else
+        {
+            prevNode->next = newNode;
+        }
+        prevNode = newNode;
+    }
+    // Make it circular - last node points to head
+    if (prevNode != NULL)
+    {
+        prevNode->next = shared->playerQueueHead;
+    }
+    shared->currentPlayerNode = NULL;
+
     // threads
-    pthread_create(&loggerThread, NULL, loggerFunction, &shared);
+    pthread_create(&loggerThread, NULL, loggerFunction, shared);
+    pthread_create(&schedulerThread, NULL, schedulerFunction, shared);
 
     // Create client handlers
 
@@ -850,7 +994,7 @@ int main()
                 exit(0);
             }
 
-            fprintf(file, "Winning team: %s \n", curTeam);
+            fprintf(file, "Winning team: %s \n", curTeam == BLUE ? "BLUE" : "RED");
             fprintf(file, "Winning players:\n");
             pthread_mutex_lock(&lock);
             for (int i = 0; i < playerCount; i++)
@@ -866,15 +1010,15 @@ int main()
                 if (playerQueue[i]->team == curTeam)
                 {
                     fprintf(file, "%s", playerQueue[i]->name);
-                    int closeStatus = close(pipes[playerQueue[i]->playerId][0]);
-                    if (closeStatus != 0)
+                    int closeStatus1 = close(pipes[playerQueue[i]->playerId][0]);
+                    if (closeStatus1 != 0)
                     {
                         printf("Error closing pipe for player %s\n", playerQueue[i]->name);
                         continue;
                     }
 
-                    int closeStatus = close(pipes[playerQueue[i]->playerId][1]);
-                    if (closeStatus != 0)
+                    int closeStatus2 = close(pipes[playerQueue[i]->playerId][1]);
+                    if (closeStatus2 != 0)
                     {
                         printf("Error closing pipe for player %s\n", playerQueue[i]->name);
                         continue;
@@ -883,7 +1027,7 @@ int main()
             }
 
             pthread_mutex_unlock(&lock);
-            pthread_join(&scoreUpdater, NULL);
+            pthread_join(scoreUpdater, NULL);
             free(name);
             break;
         }
