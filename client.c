@@ -7,6 +7,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <stdbool.h>
+#include <time.h>
 
 #define SIZE 7
 #define WATER '.'
@@ -313,14 +314,18 @@ int main()
     name[strcspn(name, "\r\n")] = '\0';
     write(sockfd, name, sizeof(name));
 
+    time_t elapsedTime;
     // retrieve id from server
     read(sockfd, &my_player_id, sizeof(my_player_id));
     printf("Connected to server as player %d\n", my_player_id);
+    read(sockfd, &elapsedTime, sizeof(elapsedTime));
 
     bool gameStart = false;
     // idle client until game starts
     // leave commented until production
-    printf("Waiting for more players...\n");
+    printf("Waiting for more players (%ds remaining)...\n", (60 - elapsedTime));
+    sleep(60 - elapsedTime);
+    // test
     ssize_t n = read(sockfd, &gameStart, sizeof(gameStart));
 
     if (n <= 0)

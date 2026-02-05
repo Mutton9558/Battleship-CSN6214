@@ -16,6 +16,8 @@
 #include <sys/wait.h>
 #include <sys/mman.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/select.h>
 
 // Fix for macOS compatibility
 #ifndef MAP_ANONYMOUS
@@ -197,11 +199,11 @@ void *load_score(void *arg)
     char team[5];
     if (player->team == BLUE)
     {
-        strncpy(team, "Blue", sizeof("Blue"));
+        strncpy(team, "Blue", sizeof(team));
     }
     else
     {
-        strncpy(team, "Red", sizeof("Red"));
+        strncpy(team, "Red", sizeof(team));
     }
     fprintf(logFile, "Player %s joined.\n", player->name);
     fprintf(logFile, "Player %s assigned team %s.\n", player->name, team);
@@ -369,14 +371,12 @@ void clientHandler(SharedData *shared, Player *player, int pipefd[2])
     }
     pthread_mutex_unlock(&shared->turnStructLock);
     teamList team = player->team;
-    teamList enemyTeam;
     char myShip[7][7];
     char enemyShip[7][7];
     bool gameStarted = true;
     write(clientFd, &gameStarted, sizeof(bool));
     if (team == RED)
     {
-        enemyTeam = BLUE;
         pthread_mutex_lock(&shared->turnStructLock);
         memcpy(myShip, shared->redShips, sizeof(shared->redShips));
         memcpy(enemyShip, shared->blueShips, sizeof(shared->blueShips));
@@ -384,7 +384,6 @@ void clientHandler(SharedData *shared, Player *player, int pipefd[2])
     }
     else
     {
-        enemyTeam = RED;
         pthread_mutex_lock(&shared->turnStructLock);
         memcpy(myShip, shared->blueShips, sizeof(shared->blueShips));
         memcpy(enemyShip, shared->redShips, sizeof(shared->redShips));
@@ -449,7 +448,6 @@ void clientHandler(SharedData *shared, Player *player, int pipefd[2])
                 if (target != HIT || target != MISS)
                 {
                     target = MISS;
-                    resultMsg msgToClient;
                     msgToClient.game_over = false;
                     msgToClient.hit = false;
                     msgToClient.sunk = false;
@@ -461,6 +459,7 @@ void clientHandler(SharedData *shared, Player *player, int pipefd[2])
                     printf("Target attempted to hit a space already hit before...\n");
                 }
             }
+            write(clientFd, &msgToClient, sizeof(msgToClient));
         }
         else if (shared->gamePhase == PHASE_GAME_OVER)
         {
@@ -686,6 +685,9 @@ int main()
 
     listen(server_fd, 1);
 
+    int flags = fcntl(server_fd, F_GETFL, 0);
+    fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
+
     printf("Server listening on port 6013\n");
 
     FILE *file = fopen("game.log", "a");
@@ -702,60 +704,78 @@ int main()
 
     pthread_create(&checkForDisconnects, NULL, pollForDisconnect, &playerCount);
 
-    pthread_mutex_lock(&lock);
-    while (playerCount < 4)
+    time_t startTime = time(NULL);
+
+    while (true)
     {
+        pthread_mutex_lock(&lock);
+        int count = playerCount;
         pthread_mutex_unlock(&lock);
-        int clientfd;
-        clientfd = accept(server_fd, NULL, NULL);
-        if (clientfd == -1)
+        // stop immediately if max reached
+        if (count == 4)
+            break;
+
+        // stop if timeout reached AND minimum satisfied
+        if (count >= 3 &&
+            difftime(time(NULL), startTime) >= 60)
+            break;
+
+        if (count < 3 && difftime(time(NULL), startTime) >= 60)
         {
-            printf("Error trying to accept clients\n");
-            exit(0);
+            printf("Not enough players\n");
+            exit(-1);
         }
-        else
+
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(server_fd, &readfds);
+
+        struct timeval tv;
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+
+        int ready = select(server_fd + 1, &readfds, NULL, NULL, &tv);
+
+        if (ready > 0 && FD_ISSET(server_fd, &readfds))
         {
+            int clientfd = accept(server_fd, NULL, NULL);
+            if (clientfd < 0)
+                continue;
+
             char buffer[51];
             ssize_t n = read(clientfd, buffer, sizeof(buffer) - 1);
             if (n <= 0)
             {
-                printf("Error reading from client\n");
                 close(clientfd);
                 continue;
             }
-            else
-            {
-                buffer[n] = '\0';
-                printf("Player %s joined!\n", buffer);
 
-                Player *newPlayer = malloc(sizeof(Player));
-                strncpy(newPlayer->name, buffer, sizeof(newPlayer->name) - 1);
-                newPlayer->playerId = playerCount;
-                newPlayer->client_fd = clientfd;
-                newPlayer->score = 0;
-                if (playerCount % 2 == 0)
-                {
-                    newPlayer->team = BLUE;
-                }
-                else
-                {
-                    newPlayer->team = RED;
-                }
+            buffer[n] = '\0';
 
-                write(clientfd, &newPlayer->playerId, sizeof(newPlayer->playerId));
+            printf("Player %s joined!\n", buffer);
 
-                pthread_mutex_lock(&lock);
-                playerQueue[playerCount] = newPlayer;
-                playerCount++;
-                pthread_mutex_unlock(&lock);
+            Player *newPlayer = malloc(sizeof(Player));
+            strncpy(newPlayer->name, buffer, sizeof(newPlayer->name) - 1);
+            newPlayer->name[50] = '\0';
 
-                pthread_create(&scoreLoader, NULL, load_score, newPlayer);
-                pthread_detach(scoreLoader);
-                pthread_mutex_lock(&lock);
-            }
+            pthread_mutex_lock(&lock);
+            newPlayer->playerId = playerCount;
+            newPlayer->team = (playerCount % 2 == 0) ? BLUE : RED;
+            newPlayer->client_fd = clientfd;
+            newPlayer->score = 0;
+            playerQueue[playerCount++] = newPlayer;
+            pthread_mutex_unlock(&lock);
+
+            write(clientfd, &newPlayer->playerId, sizeof(newPlayer->playerId));
+            time_t elapsedTime = time(NULL) - startTime;
+            write(clientfd, &elapsedTime, sizeof(elapsedTime));
+
+            pthread_create(&scoreLoader, NULL, load_score, newPlayer);
+            pthread_detach(scoreLoader);
         }
     }
-    pthread_mutex_unlock(&lock);
+
+    printf("Game about to start \n");
 
     // Initialise shared memory
 
@@ -819,8 +839,8 @@ int main()
     shared->currentPlayerNode = NULL;
 
     // threads
-    pthread_create(&loggerThread, NULL, loggerFunction, shared);
-    pthread_create(&schedulerThread, NULL, schedulerFunction, shared);
+    pthread_create(&schedulerThread, NULL, schedulerFunction, &shared);
+    pthread_create(&loggerThread, NULL, loggerFunction, &shared);
 
     // Create client handlers
 
@@ -926,6 +946,7 @@ int main()
             else if (curTeam == BLUE)
             {
                 targetArr = shared->blueShips;
+                printf("e");
             }
             else
             {
@@ -1010,15 +1031,15 @@ int main()
                 if (playerQueue[i]->team == curTeam)
                 {
                     fprintf(file, "%s", playerQueue[i]->name);
-                    int closeStatus1 = close(pipes[playerQueue[i]->playerId][0]);
-                    if (closeStatus1 != 0)
+                    int readCloseStatus = close(pipes[playerQueue[i]->playerId][0]);
+                    if (readCloseStatus != 0)
                     {
                         printf("Error closing pipe for player %s\n", playerQueue[i]->name);
                         continue;
                     }
 
-                    int closeStatus2 = close(pipes[playerQueue[i]->playerId][1]);
-                    if (closeStatus2 != 0)
+                    int writeCloseStatus = close(pipes[playerQueue[i]->playerId][1]);
+                    if (writeCloseStatus != 0)
                     {
                         printf("Error closing pipe for player %s\n", playerQueue[i]->name);
                         continue;
