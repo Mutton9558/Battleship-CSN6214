@@ -2,13 +2,13 @@ CC = gcc
 CFLAGS = -Wall -Wextra -std=c11 -g
 LDFLAGS = -pthread
 
-CLIENT = game
+CLIENT = client
 SERVER = server
 
 all: $(CLIENT) $(SERVER)
 
-$(CLIENT): game.c
-	$(CC) $(CFLAGS) game.c -o $(CLIENT)
+$(CLIENT): client.c
+	$(CC) $(CFLAGS) client.c -o $(CLIENT)
 
 $(SERVER): server.c
 	$(CC) $(CFLAGS) server.c -o $(SERVER) $(LDFLAGS)
