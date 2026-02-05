@@ -493,12 +493,6 @@ void *loggerFunction(void *arg)
 
     while (!gameEnd)
     {
-        // Wait for LOGGER turn
-        while (data->threadTurn != LOGGER && !gameEnd)
-        {
-            pthread_cond_wait(&data->turnStructCond, &data->turnStructLock);
-        }
-
         if (gameEnd)
         {
             pthread_mutex_unlock(&data->turnStructLock);
@@ -551,12 +545,6 @@ void *loggerFunction(void *arg)
         // Signal scheduler that logger has finished accessing turnState
         data->threadTurn = SCHEDULER;
         pthread_cond_broadcast(&data->turnStructCond);
-
-        // Wait for next turn
-        while (data->threadTurn == SCHEDULER && !gameEnd)
-        {
-            pthread_cond_wait(&data->turnStructCond, &data->turnStructLock);
-        }
     }
 
     if (logFile)
@@ -577,12 +565,6 @@ void *schedulerFunction(void *arg)
 
     while (!gameEnd)
     {
-        // Wait for SCHEDULER turn
-        while (data->threadTurn != SCHEDULER && !gameEnd)
-        {
-            pthread_cond_wait(&data->turnStructCond, &data->turnStructLock);
-        }
-
         if (gameEnd)
         {
             pthread_mutex_unlock(&data->turnStructLock);
@@ -641,12 +623,6 @@ void *schedulerFunction(void *arg)
         // Signal client handler that turn state is cleared and new player selected
         data->threadTurn = HANDLER;
         pthread_cond_broadcast(&data->turnStructCond);
-
-        // Wait for next turn to begin
-        while (data->threadTurn == HANDLER && !gameEnd)
-        {
-            pthread_cond_wait(&data->turnStructCond, &data->turnStructLock);
-        }
     }
 
     pthread_mutex_unlock(&data->turnStructLock);
@@ -932,10 +908,6 @@ int main()
         pthread_mutex_lock(&shared->turnStructLock);
         if (shared->gamePhase == PHASE_PLACEMENT)
         {
-
-            // maybe client handlers send game phase to client?
-            // disconnect thread will also check for phases to send different "poison pipe messages"
-
             int length = clientMessage.ship_id - 'a' + 2;
             char (*targetArr)[7];
 
@@ -1060,7 +1032,6 @@ int main()
         }
 
         // change gameState
-
         shared->threadTurn = LOGGER;
         pthread_cond_broadcast(&shared->turnStructCond);
     }
