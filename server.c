@@ -304,15 +304,6 @@ void *pollForDisconnect(void *arg)
                         printf("Player %s disconnected...\n", name);
                         pthread_create(&fileManipThread, NULL, updateFileDisconnect, name);
                         pthread_detach(fileManipThread);
-                        if (gameStart)
-                        {
-                            if (gamePhase == PHASE_PLACEMENT)
-                            {
-                                msg disconnectedMsg;
-                                disconnectedMsg.disconnected = true;
-                                write(pipes[playerQueue[i]->playerId][1], &disconnectedMsg, sizeof(disconnectedMsg));
-                            }
-                        }
 
                         free(playerQueue[i]);
                         // shift a player to fill in that player's pos and remove last item of the array
@@ -404,29 +395,23 @@ void clientHandler(SharedData *shared, Player *player, int pipefd[2])
         } while (id != curTurnPlayerId);
 
         msg clientMsg;
+        ssize_t n = read(clientFd, &clientMsg, sizeof(msg));
+        if (n <= 0)
+        {
+            printf("Client disconnected\n");
+            clientMsg.disconnected = true;
+            write(pipefd[1], &clientMsg, sizeof(clientMsg));
+            _exit(-1);
+        }
         if (shared->gamePhase == PHASE_PLACEMENT)
         {
             pthread_mutex_lock(&shared->turnStructLock);
             int teamShipCount = (player->team == RED ? shared->redShipCount : shared->blueShipCount);
             pthread_mutex_unlock(&shared->turnStructLock);
             write(clientFd, &teamShipCount, sizeof(teamShipCount));
-
-            ssize_t n = read(clientFd, &clientMsg, sizeof(msg));
-            if (n <= 0)
-            {
-                printf("Client disconnected\n");
-                exit(-1);
-            }
         }
         else if (shared->gamePhase == PHASE_PLAYING)
         {
-            ssize_t n = read(clientFd, &clientMsg, sizeof(msg));
-            if (n <= 0)
-            {
-                printf("Client disconnected\n");
-                exit(-1);
-            }
-
             int row = clientMsg.row;
             int col = clientMsg.col;
             char target = enemyShip[row][col];
@@ -478,19 +463,77 @@ void clientHandler(SharedData *shared, Player *player, int pipefd[2])
 void *loggerFunction(void *arg)
 {
     SharedData *data = (SharedData *)arg;
-    if (data->gamePhase == PHASE_PLACEMENT)
+    pthread_mutex_lock(&data->turnStructLock);
+    while (data->threadTurn != LOGGER)
     {
+        pthread_cond_wait(&data->turnStructCond, &data->turnStructLock);
     }
-    else if (data->gamePhase == PHASE_PLAYING)
+
+    while (!gameEnd)
     {
+        if (data->gamePhase == PHASE_PLACEMENT)
+        {
+            pthread_mutex_unlock(&data->turnStructLock);
+            // DEEP COPY SPECIFIC LOG INFO
+            // INFO UP TO YOU IMRAN
+            // You could make a log queue of items to be logged actually
+        }
+        else if (data->gamePhase == PHASE_PLAYING)
+        {
+            pthread_mutex_unlock(&data->turnStructLock);
+            // DEEP COPY SPECIFIC LOG INFO
+            // INFO UP TO YOU IMRAN
+            // You could make a log queue of items to be logged actually
+        }
+        else if (data->gamePhase == PHASE_GAME_OVER)
+        {
+            pthread_mutex_unlock(&data->turnStructLock);
+            // DEEP COPY SPECIFIC LOG INFO
+            // INFO UP TO YOU IMRAN
+            // You could make a log queue of items to be logged actually
+        }
+        else
+        {
+            pthread_mutex_unlock(&data->turnStructLock);
+            printf("Invalid phase\n");
+            exit(-1);
+        }
+        data->threadTurn = SCHEDULER;
+
+        // I/O Stuff Here
     }
-    else if (data->gamePhase == PHASE_GAME_OVER)
+}
+
+void *schedulerFunction(void *arg)
+{
+    SharedData *data = (SharedData *)arg;
+    pthread_mutex_lock(&data->turnStructLock);
+    while (data->threadTurn != SCHEDULER)
     {
+        pthread_cond_wait(&data->turnStructCond, &data->turnStructLock);
     }
-    else
+
+    while (!gameEnd)
     {
-        printf("Invalid phase\n");
-        exit(-1);
+        if (data->gamePhase == PHASE_PLACEMENT)
+        {
+            pthread_mutex_unlock(&data->turnStructLock);
+        }
+        else if (data->gamePhase == PHASE_PLAYING)
+        {
+            pthread_mutex_unlock(&data->turnStructLock);
+        }
+        else if (data->gamePhase == PHASE_GAME_OVER)
+        {
+            pthread_mutex_unlock(&data->turnStructLock);
+        }
+        else
+        {
+            pthread_mutex_unlock(&data->turnStructLock);
+            printf("Invalid phase\n");
+            exit(-1);
+        }
+        data->threadTurn = HANDLER;
     }
 }
 
@@ -581,12 +624,17 @@ int main()
                 {
                     newPlayer->team = RED;
                 }
+
                 write(clientfd, &newPlayer->playerId, sizeof(newPlayer->playerId));
+
                 pthread_mutex_lock(&lock);
                 playerQueue[playerCount] = newPlayer;
                 playerCount++;
+                pthread_mutex_unlock(&lock);
+
                 pthread_create(&scoreLoader, NULL, load_score, newPlayer);
                 pthread_detach(scoreLoader);
+                pthread_mutex_lock(&lock);
             }
         }
     }
