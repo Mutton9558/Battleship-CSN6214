@@ -1121,7 +1121,6 @@ int main()
             }
         }
         munmap(shared, sizeof(SharedData));
-        close(server_fd);
 
         file = fopen("game.log", "a");
         if (!file)
@@ -1134,6 +1133,8 @@ int main()
         pthread_mutex_destroy(&turnStructLock);
         pthread_cond_destroy(&turnStructConditionVar);
     }
+
+    close(server_fd);
 
     return 0;
 }
