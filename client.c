@@ -18,6 +18,7 @@
 #define PHASE_GAME_OVER 3
 #define PHASE_WAITING 0
 #define MSG_PLACE_SHIP 2
+#define SKIP_PLAYER 3
 
 // networking
 int sockfd;
@@ -48,6 +49,12 @@ typedef struct
     int length;
 } Ship;
 
+typedef enum
+{
+    BLUE,
+    RED
+} teamList;
+
 Ship ships[] = {
     {'a', 2},
     {'b', 3},
@@ -57,12 +64,23 @@ Ship ships[] = {
 char **createBoard()
 {
     char **board = malloc(SIZE * sizeof(char *));
+    if (!board)
+    {
+        perror("malloc");
+        exit(1);
+    }
+
     for (int i = 0; i < SIZE; i++)
     {
         board[i] = malloc(SIZE * sizeof(char));
-        for (int j = 0; j < SIZE; j++)
-            board[i][j] = WATER;
+        if (!board[i])
+        {
+            perror("malloc");
+            exit(1);
+        }
+        memset(board[i], WATER, SIZE);
     }
+
     return board;
 }
 
@@ -201,7 +219,6 @@ void placeShip(char **board, Ship ship, int *out_row, int *out_col, char *out_di
             *out_dir = dir;
 
             printf("\nNice! Ship '%c' is in place.\n\n", ship.symbol);
-            sleep(1);
             break;
         }
         else
@@ -219,7 +236,7 @@ void hitTarget(char **enemyView, char **playerBoard)
 
     while (1)
     {
-        clearScreen();
+        // clearScreen();
         printGameBoards(enemyView, playerBoard);
 
         printf("\nEnter target (A-G)(0-6): ");
@@ -243,6 +260,12 @@ void hitTarget(char **enemyView, char **playerBoard)
             continue;
         }
 
+        if (!enemyView || !playerBoard)
+        {
+            printf("Boards not initialized!\n");
+            return;
+        }
+
         if (enemyView[row][col] == HIT || enemyView[row][col] == MISS)
         {
             printf("\nYou already attacked this position. Choose another.\n");
@@ -250,7 +273,10 @@ void hitTarget(char **enemyView, char **playerBoard)
             continue;
         }
 
-        clientMsg attack = {0};
+        printf("Hi\n");
+
+        clientMsg attack;
+        attack.disconnected = false;
         attack.row = row;
         attack.col = col;
 
@@ -261,13 +287,22 @@ void hitTarget(char **enemyView, char **playerBoard)
 
         enemyView[row][col] = result.hit ? HIT : MISS;
 
+        if (result.hit)
+        {
+            printf("\nYou hit the enemy\n");
+        }
+        else
+        {
+            printf("\nYou missed!\n");
+        }
+
         if (result.sunk)
             printf("\nShip sunk!\n");
 
         if (result.game_over)
             printf("\nGame Over!\n");
 
-        sleep(2);
+        sleep(3);
         break;
     }
 }
@@ -276,10 +311,25 @@ void waitForTurn()
 {
     while (1)
     {
+        clearScreen();
+        ssize_t p = read(sockfd, &game_phase, sizeof(int));
+        if (p <= 0)
+        {
+            printf("Server might be down or inactive...\n");
+            printf("We apologise for the inconvenience\n");
+            close(sockfd);
+            exit(0);
+        }
+
+        if (game_phase == PHASE_GAME_OVER)
+        {
+            break;
+        }
         // Blocking read: server sends current_turn when turn changes
         read(sockfd, &current_turn, sizeof(int));
         if (current_turn == my_player_id)
             break;
+
         printf("Waiting for your turn...\n");
         sleep(1);
     }
@@ -287,107 +337,154 @@ void waitForTurn()
 
 int main()
 {
-    char **playerBoard = createBoard();
-    char **enemyBoardView = createBoard();
-
-    struct sockaddr_in serv_addr = {0};
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0)
+    while (true)
     {
-        perror("Socket creation failed");
-        exit(1);
-    }
+        char **playerBoard = createBoard();
+        char **enemyBoardView = createBoard();
 
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(6013);                     // server port
-    inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr); // server IP
-
-    if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
-    {
-        perror("Connection failed");
-        exit(1);
-    }
-    // get user's name
-    char name[50];
-    printf("Enter your name\n");
-    fgets(name, sizeof(name), stdin);
-    name[strcspn(name, "\r\n")] = '\0';
-    write(sockfd, name, sizeof(name));
-
-    time_t elapsedTime;
-    // retrieve id from server
-    read(sockfd, &my_player_id, sizeof(my_player_id));
-    printf("Connected to server as player %d\n", my_player_id);
-    read(sockfd, &elapsedTime, sizeof(elapsedTime));
-
-    bool gameStart = false;
-    // idle client until game starts
-    // leave commented until production
-    printf("Waiting for more players (%ds remaining)...\n", (60 - elapsedTime));
-    sleep(60 - elapsedTime);
-    // test
-    ssize_t n = read(sockfd, &gameStart, sizeof(gameStart));
-
-    if (n <= 0)
-    {
-        printf("Server might be down or inactive...\n");
-        printf("We apologise for the inconvenience\n");
-        close(sockfd);
-        exit(0);
-    }
-
-    clearScreen();
-
-    int teamShipCount;
-
-    while (1)
-    {
-        // get board
-        char teamServerBoard[7][7];
-        char enemyServerBoard[7][7];
-        read(sockfd, teamServerBoard, sizeof(teamServerBoard));
-        read(sockfd, enemyServerBoard, sizeof(enemyServerBoard));
-        recreateBoard(playerBoard, teamServerBoard);
-        recreateBoard(enemyBoardView, enemyServerBoard);
-
-        read(sockfd, &game_phase, sizeof(int));
-        if (game_phase == PHASE_PLACEMENT)
+        struct sockaddr_in serv_addr = {0};
+        sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sockfd < 0)
         {
+            perror("Socket creation failed");
+            exit(1);
+        }
+
+        serv_addr.sin_family = AF_INET;
+        serv_addr.sin_port = htons(6013);                     // server port
+        inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr); // server IP
+
+        if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
+        {
+            perror("Connection failed");
+            exit(1);
+        }
+        // get user's name
+        char name[50];
+        printf("Enter your name\n");
+        fgets(name, sizeof(name), stdin);
+        name[strcspn(name, "\r\n")] = '\0';
+        write(sockfd, name, sizeof(name));
+
+        time_t elapsedTime;
+        // retrieve id from server
+        read(sockfd, &my_player_id, sizeof(my_player_id));
+        printf("Connected to server as player %d\n", my_player_id);
+        read(sockfd, &elapsedTime, sizeof(elapsedTime));
+
+        bool gameStart = false;
+        // idle client until game starts
+        // leave commented until production
+        printf("Waiting for more players (%ds remaining)...\n", (60 - elapsedTime));
+        ssize_t n = read(sockfd, &gameStart, sizeof(gameStart));
+
+        if (n <= 0)
+        {
+            printf("Server might be down or inactive...\n");
+            printf("We apologise for the inconvenience\n");
+            close(sockfd);
+            exit(0);
+        }
+
+        clearScreen();
+
+        int teamShipCount;
+
+        while (1)
+        {
+            // get board
+            char teamServerBoard[7][7];
+            char enemyServerBoard[7][7];
+
             waitForTurn();
-            ssize_t n = read(sockfd, &teamShipCount, sizeof(int));
-            int row, col;
-            char dir;
-            placeShip(playerBoard, ships[teamShipCount], &row, &col, &dir);
 
-            clientMsg msg;
-            msg.disconnected = false;
-            msg.msg_type = MSG_PLACE_SHIP;
-            msg.ship_id = ships[teamShipCount].symbol;
-            msg.row = row;
-            msg.col = col;
-            msg.dir = dir;
+            if (game_phase == PHASE_PLACEMENT)
+            {
 
-            write(sockfd, &msg, sizeof(msg));
+                read(sockfd, teamServerBoard, sizeof(teamServerBoard));
+                read(sockfd, enemyServerBoard, sizeof(enemyServerBoard));
+                recreateBoard(playerBoard, teamServerBoard);
+                recreateBoard(enemyBoardView, enemyServerBoard);
+                ssize_t n = read(sockfd, &teamShipCount, sizeof(int));
+                int row, col;
+                char dir;
+                if (teamShipCount >= 4)
+                {
+                    clientMsg msg;
+                    msg.disconnected = false;
+                    msg.msg_type = SKIP_PLAYER;
+                    write(sockfd, &msg, sizeof(msg));
+                }
+                placeShip(playerBoard, ships[teamShipCount], &row, &col, &dir);
+
+                clientMsg msg;
+                msg.disconnected = false;
+                msg.msg_type = MSG_PLACE_SHIP;
+                msg.ship_id = ships[teamShipCount].symbol;
+                msg.row = row;
+                msg.col = col;
+                msg.dir = dir;
+
+                write(sockfd, &msg, sizeof(msg));
+            }
+            else if (game_phase == PHASE_PLAYING)
+            {
+                read(sockfd, teamServerBoard, sizeof(teamServerBoard));
+                read(sockfd, enemyServerBoard, sizeof(enemyServerBoard));
+                recreateBoard(playerBoard, teamServerBoard);
+                recreateBoard(enemyBoardView, enemyServerBoard);
+                hitTarget(enemyBoardView, playerBoard);
+            }
+            else if (game_phase == PHASE_GAME_OVER)
+            {
+                teamList winningTeam;
+                char (*winners)[51] = malloc(sizeof(char[2][51]));
+                printf("Game Over!\n");
+                read(sockfd, &winningTeam, sizeof(teamList));
+                read(sockfd, winners, sizeof(winners));
+
+                printf("The winners are Team %s\n", winningTeam == RED ? "RED" : "BLUE");
+                printf("Winning players:\n");
+                for (int i = 0; i < sizeof(winners) / sizeof(winners[0]); i++)
+                {
+                    printf("%s\n", winners[i]);
+                }
+                break;
+            }
         }
-        else if (game_phase == PHASE_PLAYING)
+
+        for (int i = 0; i < SIZE; i++)
         {
-            waitForTurn();
-            hitTarget(enemyBoardView, playerBoard);
+            free(playerBoard[i]);
+            free(enemyBoardView[i]);
         }
-        else if (game_phase == PHASE_GAME_OVER)
-        {
-            printf("Game Over!\n");
-            break;
-        }
-    }
+        free(playerBoard);
+        free(enemyBoardView);
 
-    for (int i = 0; i < SIZE; i++)
-    {
-        free(playerBoard[i]);
-        free(enemyBoardView[i]);
+        char ans;
+        bool playAgain;
+
+        do
+        {
+            printf("Play again? (y/n)\n");
+            fgets(ans, sizeof(char), stdin);
+
+            if (tolower(ans) == 'y')
+            {
+                playAgain = true;
+                break;
+            }
+            else if (tolower(ans) == 'n')
+            {
+                playAgain = false;
+                break;
+            }
+            else
+            {
+                printf("Please only enter either y or n!\n");
+            }
+        } while (true);
     }
-    free(playerBoard);
-    free(enemyBoardView);
 
     return 0;
 }
