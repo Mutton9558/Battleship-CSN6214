@@ -46,6 +46,7 @@ typedef struct
     int client_fd;
     int playerId;
     int score;
+    bool disconnected;
 } Player;
 
 typedef struct PlayerNode
@@ -87,6 +88,8 @@ typedef struct
     PlayerNode *playerQueueHead;
     PlayerNode *currentPlayerNode;
     int activePlayerCount;
+    teamList winningTeam;
+    char name[2][51];
 } SharedData;
 
 typedef struct
@@ -187,14 +190,17 @@ void *load_score(void *arg)
     }
     fclose(file);
 
-    FILE *scoreFile = fopen("score.txt", "a");
-    if (!scoreFile)
+    if (!playerFound)
     {
-        printf("Error in opening score file\n");
-        exit(0);
+        FILE *scoreFile = fopen("score.txt", "a");
+        if (!scoreFile)
+        {
+            printf("Error in opening score file\n");
+            exit(0);
+        }
+        fprintf(scoreFile, "%s: %d\n", player->name, 0);
+        fclose(scoreFile);
     }
-    fprintf(scoreFile, "%s: %d", player->name, 0);
-    fclose(scoreFile);
 
     FILE *logFile = fopen("game.log", "a");
     if (!logFile)
@@ -264,7 +270,6 @@ void *updateScore(void *arg)
     {
         printf("Failed to remove score file!\n");
     }
-    free(winnerList);
     return NULL;
 }
 
@@ -328,10 +333,23 @@ void *pollForDisconnect(void *arg)
                         pthread_create(&fileManipThread, NULL, updateFileDisconnect, name);
                         pthread_detach(fileManipThread);
 
-                        free(playerQueue[i]);
-                        // shift a player to fill in that player's pos and remove last item of the array
-                        playerQueue[i] = NULL;
-                        (*playerCount)--;
+                        if (!gameStart)
+                        {
+                            for (int j = i; j < (*playerCount) - 1; j++)
+                            {
+                                playerQueue[j] = playerQueue[j + 1];
+                                playerQueue[j]->playerId = j;
+                            }
+
+                            playerQueue[(*playerCount) - 1] = NULL;
+                            (*playerCount)--;
+                            free(playerQueue[i]);
+                        }
+                        else
+                        {
+                            playerQueue[i]->disconnected = true;
+                        }
+
                         pthread_mutex_unlock(&lock);
                     }
                 }
@@ -418,11 +436,8 @@ void clientHandler(SharedData *shared, Player *player, int pipefd[2])
         write(clientFd, myShip, sizeof(myShip));
         write(clientFd, enemyShip, sizeof(enemyShip));
 
-        printf("phase: %d\n", shared->gamePhase);
-
         if (shared->gamePhase == PHASE_PLACEMENT)
         {
-            printf("%s choosing\n", shared->gameState.curTurnPlayer->name);
             pthread_mutex_lock(&shared->turnStructLock);
             int teamShipCount = (team == RED ? shared->redShipCount : shared->blueShipCount);
             pthread_mutex_unlock(&shared->turnStructLock);
@@ -431,6 +446,7 @@ void clientHandler(SharedData *shared, Player *player, int pipefd[2])
             if (n <= 0)
             {
                 printf("Client disconnected\n");
+                fflush(stdout);
                 clientMsg.disconnected = true;
                 write(pipefd[1], &clientMsg, sizeof(clientMsg));
                 _exit(-1);
@@ -442,6 +458,7 @@ void clientHandler(SharedData *shared, Player *player, int pipefd[2])
             if (n <= 0)
             {
                 printf("Client disconnected\n");
+                fflush(stdout);
                 clientMsg.disconnected = true;
                 write(pipefd[1], &clientMsg, sizeof(clientMsg));
                 _exit(-1);
@@ -493,20 +510,23 @@ void clientHandler(SharedData *shared, Player *player, int pipefd[2])
                 else
                 {
                     printf("Target attempted to hit a space already hit before...\n");
+                    fflush(stdout);
                 }
             }
-            printf("target: %c\n", enemyShip[row][col]);
             write(clientFd, &msgToClient, sizeof(msgToClient));
         }
         else if (shared->gamePhase == PHASE_GAME_OVER)
         {
             teamList winners;
-            char (*winnerNames)[51] = malloc(sizeof(char[2][51]));
-            read(pipefd[0], &winners, sizeof(teamList));
-            read(pipefd[0], winnerNames, sizeof(char[2][51]));
+            char winnerNames[2][51];
+            memcpy(winnerNames, shared->name, sizeof(shared->name));
 
-            write(clientFd, winners, sizeof(teamList));
-            write(clientFd, winnerNames, sizeof(char[2][51]));
+            printf("Winner names %s\n", winnerNames[0]);
+            printf("Winner names %s\n", winnerNames[1]);
+            fflush(stdout);
+
+            write(clientFd, &winners, sizeof(teamList));
+            write(clientFd, winnerNames, sizeof(winnerNames));
             _exit(0);
         }
 
@@ -633,7 +653,7 @@ void *schedulerFunction(void *arg)
 
             // Check if current player has been disconnected
             // If disconnected, move to next
-            while (data->currentPlayerNode && data->currentPlayerNode->player == NULL)
+            while (data->currentPlayerNode && data->currentPlayerNode->player->disconnected)
             {
                 if (data->currentPlayerNode->next != NULL)
                 {
@@ -774,6 +794,7 @@ int main()
                 newPlayer->team = (playerCount % 2 == 0) ? BLUE : RED;
                 newPlayer->client_fd = clientfd;
                 newPlayer->score = 0;
+                newPlayer->disconnected = false;
                 playerQueue[playerCount++] = newPlayer;
                 pthread_mutex_unlock(&lock);
 
@@ -895,9 +916,19 @@ int main()
             int id = currentPlayer->playerId;
             pthread_mutex_unlock(&shared->turnStructLock);
 
-            if (playerCount <= 0)
+            int activePlayers = 0;
+            for (int i = 0; i < playerCount; i++)
             {
-                for (int i = 0; i < 4; i++)
+                if (!playerQueue[i]->disconnected)
+                {
+                    activePlayers++;
+                }
+            }
+
+            if (activePlayers <= 0)
+            {
+                // close any remaining pipes
+                for (int i = 0; i < playerCount; i++)
                 {
                     if (pipes[i][0] != -1)
                     {
@@ -917,12 +948,15 @@ int main()
                     exit(0);
                 }
                 fprintf(file, "All players disconnected.\n");
+                fflush(file);
+                fclose(file);
                 break;
             }
 
             msg clientMessage;
 
-            read(pipes[id][0], &clientMessage, sizeof(clientMessage));
+            if (shared->gamePhase != PHASE_GAME_OVER)
+                read(pipes[id][0], &clientMessage, sizeof(clientMessage));
 
             // if player disconnected
             if (clientMessage.disconnected)
@@ -933,7 +967,7 @@ int main()
                 shared->gameState.shipHit = false;
                 shared->gameState.shipDestroyed = false;
                 shared->gameState.gameEnd = false;
-                if (playerCount <= 2)
+                if (activePlayers <= 2)
                 {
                     bool teammateExist = false;
                     for (int i = 0; i < playerCount; i++)
@@ -946,7 +980,7 @@ int main()
                     }
                     if (!teammateExist)
                     {
-                        printf("All players from team %s disconnected!", curTeam == RED ? "RED" : "BLUE");
+                        printf("All players from team %s disconnected!\n", curTeam == RED ? "RED" : "BLUE");
                         shared->gamePhase = PHASE_GAME_OVER;
                     }
                 }
@@ -1020,7 +1054,9 @@ int main()
                 shared->gameState.shipDestroyed = clientMessage.sunk;
                 // decrement count on enemy team if a ship is sunk
                 if (clientMessage.sunk)
+                {
                     curTeam == RED ? shared->blueShipCount-- : shared->redShipCount--;
+                }
 
                 if (shared->blueShipCount == 0 || shared->redShipCount == 0)
                 {
@@ -1032,46 +1068,40 @@ int main()
             else if (shared->gamePhase == PHASE_GAME_OVER)
             {
                 pthread_mutex_unlock(&shared->turnStructLock);
-                char (*name)[51] = malloc(sizeof(char[2][51]));
-                short pCount = 0;
-                file = fopen("game.log", "a");
-                if (!file)
-                {
-                    printf("Error in opening log file\n");
-                    exit(0);
-                }
+                int pCount = 0;
 
-                teamList winningTeam;
+                printf("Are we succesful?\n");
+
                 if (shared->blueShipCount == 0)
                 {
-                    winningTeam = RED;
+                    shared->winningTeam = RED;
                 }
                 else
                 {
-                    winningTeam = BLUE;
+                    shared->winningTeam = BLUE;
                 }
 
-                fprintf(file, "Winning team: %s \n", winningTeam == BLUE ? "BLUE" : "RED");
-                fprintf(file, "Winning players:\n");
-                pthread_mutex_lock(&lock);
                 for (int i = 0; i < playerCount; i++)
                 {
-                    if (playerQueue[i] != NULL && playerQueue[i]->team == winningTeam)
+                    if (playerQueue[i] != NULL && playerQueue[i]->team == shared->winningTeam)
                     {
-                        strcpy(name[pCount++], playerQueue[i]->name);
+                        strcpy(shared->name[pCount], playerQueue[i]->name);
+                        shared->name[pCount][50] = '\0';
+                        pCount++;
                     }
                 }
-                pthread_create(&scoreUpdater, NULL, updateScore, name);
+
+                printf("%s\n", shared->name[0]);
+                printf("%s\n", shared->name[1]);
+
+                pthread_create(&scoreUpdater, NULL, updateScore, shared->name);
+
                 for (int i = 0; i < playerCount; i++)
                 {
                     if (playerQueue[i]->team == curTeam)
                     {
                         int readPipe = pipes[playerQueue[i]->playerId][0];
                         int writePipe = pipes[playerQueue[i]->playerId][1];
-                        write(writePipe, winningTeam, sizeof(teamList));
-                        write(writePipe, name, sizeof(char[2][51]));
-
-                        fprintf(file, "%s", playerQueue[i]->name);
                         int readCloseStatus = close(readPipe);
                         if (readCloseStatus != 0)
                         {
@@ -1088,9 +1118,24 @@ int main()
                     }
                 }
 
-                pthread_mutex_unlock(&lock);
+                FILE *gameEndLog = fopen("game.log", "a");
+                if (!gameEndLog)
+                {
+                    printf("Error in opening log file\n");
+                    exit(0);
+                }
+
+                fprintf(gameEndLog, "Winning team: %s \n", shared->winningTeam == BLUE ? "BLUE" : "RED");
+                fprintf(gameEndLog, "Winning players:\n");
+                for (int i = 0; i < playerCount; i++)
+                {
+                    if (playerQueue[i]->team == shared->winningTeam)
+                        fprintf(gameEndLog, "%s\n", playerQueue[i]->name);
+                }
+                fflush(gameEndLog);
+                fclose(gameEndLog);
+
                 pthread_join(scoreUpdater, NULL);
-                free(name);
                 break;
             }
             else

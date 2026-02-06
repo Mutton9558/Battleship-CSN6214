@@ -272,9 +272,6 @@ void hitTarget(char **enemyView, char **playerBoard)
             sleep(1);
             continue;
         }
-
-        printf("Hi\n");
-
         clientMsg attack;
         attack.disconnected = false;
         attack.row = row;
@@ -375,7 +372,7 @@ int main()
         bool gameStart = false;
         // idle client until game starts
         // leave commented until production
-        printf("Waiting for more players (%ds remaining)...\n", (60 - elapsedTime));
+        printf("Waiting for more players (%ds remaining)...\n", (int)(60 - elapsedTime));
         ssize_t n = read(sockfd, &gameStart, sizeof(gameStart));
 
         if (n <= 0)
@@ -406,6 +403,13 @@ int main()
                 recreateBoard(playerBoard, teamServerBoard);
                 recreateBoard(enemyBoardView, enemyServerBoard);
                 ssize_t n = read(sockfd, &teamShipCount, sizeof(int));
+                if (n <= 0)
+                {
+                    printf("Server might be down or inactive...\n");
+                    printf("We apologise for the inconvenience\n");
+                    close(sockfd);
+                    exit(0);
+                }
                 int row, col;
                 char dir;
                 if (teamShipCount >= 4)
@@ -438,17 +442,23 @@ int main()
             else if (game_phase == PHASE_GAME_OVER)
             {
                 teamList winningTeam;
-                char (*winners)[51] = malloc(sizeof(char[2][51]));
+                char (*winners)[51] = malloc(sizeof(char[4][51]));
+                winners[0][0] = '\0';
+                winners[1][0] = '\0';
+                winners[2][0] = '\0';
+                winners[3][0] = '\0';
                 printf("Game Over!\n");
                 read(sockfd, &winningTeam, sizeof(teamList));
-                read(sockfd, winners, sizeof(winners));
+                read(sockfd, winners, 4 * 51);
 
                 printf("The winners are Team %s\n", winningTeam == RED ? "RED" : "BLUE");
                 printf("Winning players:\n");
-                for (int i = 0; i < sizeof(winners) / sizeof(winners[0]); i++)
+                for (int i = 0; i < 4; i++)
                 {
-                    printf("%s\n", winners[i]);
+                    if (winners[i][0] != '\0')
+                        printf("%s\n", winners[i]);
                 }
+                free(winners);
                 break;
             }
         }
@@ -461,20 +471,20 @@ int main()
         free(playerBoard);
         free(enemyBoardView);
 
-        char ans;
+        char ans[2];
         bool playAgain;
 
         do
         {
             printf("Play again? (y/n)\n");
-            fgets(ans, sizeof(char), stdin);
-
-            if (tolower(ans) == 'y')
+            fgets(ans, sizeof(ans), stdin);
+            ans[1] = '\0';
+            if (tolower(ans[0]) == 'y')
             {
                 playAgain = true;
                 break;
             }
-            else if (tolower(ans) == 'n')
+            else if (tolower(ans[0]) == 'n')
             {
                 playAgain = false;
                 break;
@@ -484,6 +494,11 @@ int main()
                 printf("Please only enter either y or n!\n");
             }
         } while (true);
+
+        if (!playAgain)
+        {
+            break;
+        }
     }
 
     return 0;
