@@ -41,7 +41,7 @@ typedef enum
 
 typedef struct
 {
-    char name[50];
+    char name[51];
     teamList team;
     int client_fd;
     int playerId;
@@ -173,6 +173,7 @@ void *load_score(void *arg)
     char line[63];
     int score;
     char name[51];
+    bool playerFound = false;
     while (fgets(line, 63, file))
     {
         if (sscanf(line, "%50[^:]: %d", name, &score) == 2)
@@ -180,10 +181,20 @@ void *load_score(void *arg)
             if (strcmp(name, player->name) == 0)
             {
                 player->score = score;
+                playerFound = true;
             }
         }
     }
     fclose(file);
+
+    FILE *scoreFile = fopen("score.txt", "a");
+    if (!scoreFile)
+    {
+        printf("Error in opening score file\n");
+        exit(0);
+    }
+    fprintf(scoreFile, "%s: %d", player->name, 0);
+    fclose(scoreFile);
 
     FILE *logFile = fopen("game.log", "a");
     if (!logFile)
