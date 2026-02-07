@@ -339,6 +339,8 @@ int main()
         char **playerBoard = createBoard();
         char **enemyBoardView = createBoard();
 
+        printf("Welcome to Battleship!\n");
+
         struct sockaddr_in serv_addr = {0};
         sockfd = socket(AF_INET, SOCK_STREAM, 0);
         if (sockfd < 0)
@@ -366,7 +368,7 @@ int main()
         time_t elapsedTime;
         // retrieve id from server
         read(sockfd, &my_player_id, sizeof(my_player_id));
-        printf("Connected to server as player %d\n", my_player_id);
+        printf("Welcome player %d!\n", my_player_id);
         read(sockfd, &elapsedTime, sizeof(elapsedTime));
 
         bool gameStart = false;
@@ -383,7 +385,29 @@ int main()
             exit(0);
         }
 
-        clearScreen();
+        int score;
+        teamList myTeam;
+        char teamMembers[2][51];
+        teamMembers[0][0] = '\0';
+        teamMembers[1][0] = '\0';
+
+        read(sockfd, &score, sizeof(score));
+        read(sockfd, &myTeam, sizeof(myTeam));
+        read(sockfd, teamMembers, sizeof(teamMembers));
+
+        printf("Your current score: %d\n", score);
+
+        printf("You are on Team %s\n", myTeam == BLUE ? "BLUE" : "RED");
+
+        printf("Team members:\n");
+
+        for (int i = 0; i < 2; i++)
+        {
+            if (teamMembers[i][0] != '\0')
+                printf("%s\n", teamMembers[i]);
+        }
+
+        sleep(3);
 
         int teamShipCount;
 
@@ -442,23 +466,17 @@ int main()
             else if (game_phase == PHASE_GAME_OVER)
             {
                 teamList winningTeam;
-                char (*winners)[51] = malloc(sizeof(char[4][51]));
-                winners[0][0] = '\0';
-                winners[1][0] = '\0';
-                winners[2][0] = '\0';
-                winners[3][0] = '\0';
                 printf("Game Over!\n");
                 read(sockfd, &winningTeam, sizeof(teamList));
-                read(sockfd, winners, 4 * 51);
-
                 printf("The winners are Team %s\n", winningTeam == RED ? "RED" : "BLUE");
-                printf("Winning players:\n");
-                for (int i = 0; i < 4; i++)
+                if (myTeam == winningTeam)
                 {
-                    if (winners[i][0] != '\0')
-                        printf("%s\n", winners[i]);
+                    printf("YOU WON!\n");
                 }
-                free(winners);
+                else
+                {
+                    printf("You lost...\n");
+                }
                 break;
             }
         }
