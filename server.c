@@ -394,7 +394,7 @@ void clientHandler(SharedData *shared, Player *player, int pipefd[2])
     char enemyShip[7][7];
     bool gameStarted = true;
     write(clientFd, &gameStarted, sizeof(bool));
-    write(clientFd, &shared->gameState.curTurnPlayer->score, sizeof(shared->gameState.curTurnPlayer->score));
+    write(clientFd, player->score, sizeof(player->score));
     write(clientFd, &team, sizeof(teamList));
     if (team == RED)
     {
