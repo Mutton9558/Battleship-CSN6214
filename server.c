@@ -681,10 +681,15 @@ void *schedulerFunction(void *arg)
             else
                 data->currentPlayerNode = data->currentPlayerNode->next ? data->currentPlayerNode->next : data->playerQueueHead;
 
+            while (data->gameState.gamePhase == PHASE_PLACEMENT && data->currentPlayerNode->player->team == RED && data->redShipCount == 4)
+            {
+                data->currentPlayerNode = data->currentPlayerNode->next ? data->currentPlayerNode->next : data->playerQueueHead;
+            }
+
             PlayerNode *startNode = data->currentPlayerNode;
 
             // Skip disconnected players
-            while (data->currentPlayerNode->player->disconnected)
+            while ((data->gameState.gamePhase == PHASE_PLACEMENT && data->currentPlayerNode->player->team == RED && data->redShipCount == 4) || (data->gameState.gamePhase == PHASE_PLACEMENT && data->currentPlayerNode->player->team == BLUE && data->blueShipCount == 4) || data->currentPlayerNode->player->disconnected)
             {
                 data->currentPlayerNode = data->currentPlayerNode->next ? data->currentPlayerNode->next : data->playerQueueHead;
 
