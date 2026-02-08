@@ -70,6 +70,8 @@ typedef struct
     bool shipHit;
     bool gameEnd;
     int gamePhase;
+    char disconnectedPlayerNames[4][51];
+    int disconnectedPlayerCount;
 } turnState;
 
 typedef struct
@@ -88,6 +90,7 @@ typedef struct
     PlayerNode *currentPlayerNode;
     teamList winningTeam;
     char winnerNames[2][51];
+    bool allPlayersLeft;
 } SharedData;
 
 typedef struct
@@ -276,7 +279,7 @@ void *updateScore(void *arg)
 void *pollForDisconnect(void *arg)
 {
     int *playerCount = (int *)arg;
-    while (!gameEnd)
+    while (!gameStart)
     {
 
         struct pollfd poller[4];
@@ -324,36 +327,18 @@ void *pollForDisconnect(void *arg)
                         }
                         fprintf(logFile, "Player %s disconnected.\n", name);
 
-                        if (!gameStart)
+                        free(playerQueue[i]);
+                        for (int j = i; j < (*playerCount) - 1; j++)
                         {
-                            free(playerQueue[i]);
-                            for (int j = i; j < (*playerCount) - 1; j++)
-                            {
-                                (playerQueue[(*playerCount) - 1]->team == RED) ? redPlayersCount-- : bluePlayersCount--;
-                                playerQueue[j] = playerQueue[j + 1];
-                                playerQueue[j]->playerId = j;
-                                playerQueue[j]->team = (playerQueue[j]->team == RED) ? BLUE : RED;
-                                fprintf(logFile, "Player %s reassigned to team %s\n.", playerQueue[j]->name, playerQueue[j]->team == RED ? "RED" : "BLUE");
-                            }
+                            (playerQueue[(*playerCount) - 1]->team == RED) ? redPlayersCount-- : bluePlayersCount--;
+                            playerQueue[j] = playerQueue[j + 1];
+                            playerQueue[j]->playerId = j;
+                            playerQueue[j]->team = (playerQueue[j]->team == RED) ? BLUE : RED;
+                            fprintf(logFile, "Player %s reassigned to team %s\n.", playerQueue[j]->name, playerQueue[j]->team == RED ? "RED" : "BLUE");
+                        }
 
-                            playerQueue[(*playerCount) - 1] = NULL;
-                            (*playerCount)--;
-                        }
-                        else
-                        {
-                            playerQueue[i]->disconnected = true;
-                            for (int j = 0; j < (*playerCount); j++)
-                            {
-                                if (playerQueue[j]->team == RED && playerQueue[j]->disconnected)
-                                {
-                                    redPlayersCount--;
-                                }
-                                else
-                                {
-                                    bluePlayersCount--;
-                                }
-                            }
-                        }
+                        playerQueue[(*playerCount) - 1] = NULL;
+                        (*playerCount)--;
                         fflush(logFile);
                         fclose(logFile);
 
@@ -423,6 +408,7 @@ void clientHandler(SharedData *shared, Player *player, int pipefd[2])
     while (true)
     {
         int curTurnPlayerId;
+        msg clientMsg;
         do
         {
             pthread_mutex_lock(&shared->turnStructLock);
@@ -430,10 +416,25 @@ void clientHandler(SharedData *shared, Player *player, int pipefd[2])
             write(clientFd, &shared->gameState.gamePhase, sizeof(shared->gameState.gamePhase));
             pthread_mutex_unlock(&shared->turnStructLock);
             write(clientFd, &curTurnPlayerId, sizeof(curTurnPlayerId));
+
+            if (shared->gameState.gamePhase != PHASE_GAME_OVER)
+            {
+                bool isAlive = false;
+                ssize_t aliveCheck = read(clientFd, &isAlive, sizeof(isAlive));
+                if (aliveCheck <= 0)
+                {
+                    // client likely disconnected
+                    strcpy(shared->gameState.disconnectedPlayerNames[shared->gameState.disconnectedPlayerCount++], player->name);
+                    printf("Client disconnected\n");
+                    fflush(stdout);
+                    clientMsg.disconnected = true;
+                    write(pipefd[1], &clientMsg, sizeof(clientMsg));
+                    _exit(-1);
+                }
+            }
+
             sleep(1);
         } while (id != curTurnPlayerId);
-
-        msg clientMsg;
 
         if (team == RED)
         {
@@ -464,7 +465,9 @@ void clientHandler(SharedData *shared, Player *player, int pipefd[2])
             {
                 printf("Client disconnected\n");
                 fflush(stdout);
+                strcpy(shared->gameState.disconnectedPlayerNames[shared->gameState.disconnectedPlayerCount++], player->name);
                 clientMsg.disconnected = true;
+                printf("Disconnected? %s\n", player->disconnected ? "TRUE" : "FALSE");
                 write(pipefd[1], &clientMsg, sizeof(clientMsg));
                 _exit(-1);
             }
@@ -476,6 +479,7 @@ void clientHandler(SharedData *shared, Player *player, int pipefd[2])
             {
                 printf("Client disconnected\n");
                 fflush(stdout);
+                strcpy(shared->gameState.disconnectedPlayerNames[shared->gameState.disconnectedPlayerCount++], player->name);
                 clientMsg.disconnected = true;
                 write(pipefd[1], &clientMsg, sizeof(clientMsg));
                 _exit(-1);
@@ -552,7 +556,7 @@ void clientHandler(SharedData *shared, Player *player, int pipefd[2])
         }
 
         write(pipefd[1], &clientMsg, sizeof(clientMsg));
-        sleep(2);
+        sleep(1);
     }
 
     pthread_cond_broadcast(&shared->turnStructCond);
@@ -571,20 +575,33 @@ void *loggerFunction(void *arg)
             pthread_cond_wait(&data->turnStructCond, &data->turnStructLock);
         }
 
-        // Read and log turn state data
-        Player *currentPlayer = data->gameState.curTurnPlayer;
-        Tuple hitTarget = data->gameState.hitTarget;
-        bool shipHit = data->gameState.shipHit;
-        bool shipDestroyed = data->gameState.shipDestroyed;
-        int currentPhase = data->gameState.gamePhase;
+        // Read and log turn state data. Deep copy so scheduler and handler changing data do not affect logger
+        Player *currentPlayer = malloc(sizeof(Player));
+        *currentPlayer = *data->gameState.curTurnPlayer;
+        Tuple *hitTarget = malloc(sizeof(Tuple));
+        *hitTarget = data->gameState.hitTarget;
+        bool *shipHit = malloc(sizeof(bool));
+        *shipHit = data->gameState.shipHit;
+        bool *shipDestroyed = malloc(sizeof(bool));
+        *shipDestroyed = data->gameState.shipDestroyed;
+        int *currentPhase = malloc(sizeof(int));
+        *currentPhase = data->gameState.gamePhase;
+        char disconnectedPlayers[4][51] = {0};
 
+        for (int i = 0; i < 4; i++)
+        {
+            strcpy(disconnectedPlayers[i], data->gameState.disconnectedPlayerNames[i]);
+        }
+
+        // Signal scheduler that logger has finished accessing turnState
+        data->threadTurn = SCHEDULER;
+        pthread_cond_broadcast(&data->turnStructCond);
         pthread_mutex_unlock(&data->turnStructLock);
 
         FILE *logFile = fopen("game.log", "a");
         if (!logFile)
         {
             printf("Error opening game.log for logging\n");
-            pthread_mutex_unlock(&data->turnStructLock);
             return NULL;
         }
 
@@ -598,17 +615,24 @@ void *loggerFunction(void *arg)
                     currentPlayer->playerId);
         }
 
+        for (int i = 0; i < 4; i++)
+        {
+            if (disconnectedPlayers[i][0] == '\0')
+                break;
+            fprintf(logFile, "Player %s disconnected!\n", disconnectedPlayers[i]);
+        }
+
         fprintf(logFile, "Game Phase: ");
-        switch (currentPhase)
+        switch (*currentPhase)
         {
         case PHASE_PLACEMENT:
             fprintf(logFile, "PLACEMENT\n");
             break;
         case PHASE_PLAYING:
             fprintf(logFile, "PLAYING\n");
-            fprintf(logFile, "Target: (%d, %d)\n", hitTarget.x, hitTarget.y);
-            fprintf(logFile, "Ship Hit: %s\n", shipHit ? "YES" : "NO");
-            fprintf(logFile, "Ship Destroyed: %s\n", shipDestroyed ? "YES" : "NO");
+            fprintf(logFile, "Target: (%d, %d)\n", (*hitTarget).x, (*hitTarget).y);
+            fprintf(logFile, "Ship Hit: %s\n", *shipHit ? "YES" : "NO");
+            fprintf(logFile, "Ship Destroyed: %s\n", *shipDestroyed ? "YES" : "NO");
             break;
         case PHASE_GAME_OVER:
             fprintf(logFile, "GAME_OVER\n");
@@ -620,12 +644,12 @@ void *loggerFunction(void *arg)
         fflush(logFile);
         fclose(logFile);
 
-        pthread_mutex_lock(&data->turnStructLock);
-
-        // Signal scheduler that logger has finished accessing turnState
-        data->threadTurn = SCHEDULER;
-        pthread_mutex_unlock(&data->turnStructLock);
-        pthread_cond_broadcast(&data->turnStructCond);
+        // free variables
+        free(currentPlayer);
+        free(hitTarget);
+        free(shipHit);
+        free(shipDestroyed);
+        free(currentPhase);
     }
     return NULL;
 }
@@ -638,65 +662,82 @@ void *schedulerFunction(void *arg)
     {
         pthread_mutex_lock(&data->turnStructLock);
 
+        // Wait for scheduler turn
         while (data->threadTurn != SCHEDULER)
-        {
             pthread_cond_wait(&data->turnStructCond, &data->turnStructLock);
-        }
 
-        // Clear the turn state for the new turn
+        // Clear the turn state
         data->gameState.hitTarget.x = -1;
         data->gameState.hitTarget.y = -1;
         data->gameState.shipHit = false;
         data->gameState.shipDestroyed = false;
         data->gameState.gameEnd = false;
 
-        // Select next player's turn from the linked list
         if (data->playerQueueHead != NULL)
         {
+            // If first turn, start with head
             if (data->currentPlayerNode == NULL)
-            {
-                // First time, start with head
                 data->currentPlayerNode = data->playerQueueHead;
-            }
             else
+                data->currentPlayerNode = data->currentPlayerNode->next ? data->currentPlayerNode->next : data->playerQueueHead;
+
+            PlayerNode *startNode = data->currentPlayerNode;
+
+            // Skip disconnected players
+            while (data->currentPlayerNode->player->disconnected)
             {
-                // Move to next player in circular linked list
-                if (data->currentPlayerNode->next != NULL)
+                data->currentPlayerNode = data->currentPlayerNode->next ? data->currentPlayerNode->next : data->playerQueueHead;
+
+                // Full loop done → all players disconnected
+                if (data->currentPlayerNode == startNode)
                 {
-                    data->currentPlayerNode = data->currentPlayerNode->next;
-                }
-                else
-                {
-                    // Wrap around to head
-                    data->currentPlayerNode = data->playerQueueHead;
+                    data->gameState.gamePhase = PHASE_GAME_OVER;
+                    data->allPlayersLeft = true;
+                    break;
                 }
             }
 
-            // Check if current player has been disconnected
-            // If disconnected, move to next
-            while (data->currentPlayerNode && data->currentPlayerNode->player->disconnected)
+            // If all players left, skip further processing
+            if (!data->allPlayersLeft)
             {
-                if (data->currentPlayerNode->next != NULL)
+                // Count active players
+                int activeCount = 0;
+                int redCount = 0, blueCount = 0;
+                PlayerNode *iter = data->playerQueueHead;
+                do
                 {
-                    data->currentPlayerNode = data->currentPlayerNode->next;
-                }
-                else
-                {
-                    data->currentPlayerNode = data->playerQueueHead;
-                }
-            }
+                    if (!iter->player->disconnected)
+                    {
+                        activeCount++;
+                        if (iter->player->team == RED)
+                            redCount++;
+                        else
+                            blueCount++;
+                    }
+                    iter = iter->next ? iter->next : data->playerQueueHead;
+                } while (iter != data->playerQueueHead);
 
-            if (data->currentPlayerNode && data->currentPlayerNode->player != NULL)
-            {
+                // Check for game over conditions
+                if (activeCount <= 2 && (redCount == 0 || blueCount == 0))
+                {
+                    data->gameState.gamePhase = PHASE_GAME_OVER;
+                    if (redCount == 0)
+                        data->blueShipCount = 0;
+                    else
+                        data->redShipCount = 0;
+                }
+
+                // Assign current turn player
                 data->gameState.curTurnPlayer = data->currentPlayerNode->player;
                 printf("Selected player %s\n", data->currentPlayerNode->player->name);
+                printf("Player disconnected? %s\n", data->currentPlayerNode->player->disconnected ? "TRUE" : "FALSE");
             }
         }
 
-        // Signal client handler that turn state is cleared and new player selected
+        // Signal client handler
         data->threadTurn = HANDLER;
-        pthread_mutex_unlock(&data->turnStructLock);
         pthread_cond_broadcast(&data->turnStructCond);
+        pthread_mutex_unlock(&data->turnStructLock);
     }
 
     return NULL;
@@ -884,8 +925,12 @@ int main()
         shared->gameState.gamePhase = PHASE_PLACEMENT;
         memset(shared->redShips, 0, sizeof shared->redShips);
         memset(shared->blueShips, 0, sizeof shared->blueShips);
-        memset(shared->winnerNames[0], 0, sizeof(shared->winnerNames[0]));
-        memset(shared->winnerNames[1], 0, sizeof(shared->winnerNames[0]));
+        memset(shared->winnerNames, 0, sizeof(shared->winnerNames[0]));
+        memset(shared->redTeamMembers, 0, 51);
+        memset(shared->blueTeamMembers, 0, 51);
+        memset(shared->gameState.disconnectedPlayerNames, 0, sizeof(shared->gameState.disconnectedPlayerNames));
+        shared->gameState.disconnectedPlayerCount = 0;
+        shared->allPlayersLeft = false;
 
         // Initialize circular linked list of players
         PlayerNode *prevNode = NULL;
@@ -914,21 +959,16 @@ int main()
 
         int redMemCount = 0;
         int blueMemCount = 0;
-        shared->redTeamMembers[0][0] = '\0';
-        shared->redTeamMembers[1][0] = '\0';
-        shared->blueTeamMembers[0][0] = '\0';
-        shared->blueTeamMembers[1][0] = '\0';
         for (int i = 0; i < playerCount; i++)
         {
             if (playerQueue[i]->team == RED)
             {
-                memset(shared->redTeamMembers[redMemCount], 0, 51);
+
                 strncpy(shared->redTeamMembers[redMemCount], playerQueue[i]->name, 50);
                 redMemCount++;
             }
             else
             {
-                memset(shared->blueTeamMembers[blueMemCount], 0, 51);
                 strncpy(shared->blueTeamMembers[blueMemCount], playerQueue[i]->name, 50);
                 blueMemCount++;
             }
@@ -975,10 +1015,17 @@ int main()
                 pthread_cond_wait(&shared->turnStructCond, &shared->turnStructLock);
             }
 
+            for (int i = 0; i < playerCount; i++)
+            {
+                printf("Player %s disconnected? %s\n", playerQueue[i]->name, playerQueue[i]->disconnected ? "TRUE" : "FALSE");
+            }
+
             // get current player info
             Player *currentPlayer = (shared->gameState).curTurnPlayer;
             teamList curTeam = currentPlayer->team;
             int id = currentPlayer->playerId;
+            memset(shared->gameState.disconnectedPlayerNames, 0, sizeof(shared->gameState.disconnectedPlayerNames));
+            shared->gameState.disconnectedPlayerCount = 0;
             pthread_mutex_unlock(&shared->turnStructLock);
 
             msg clientMessage;
@@ -989,19 +1036,21 @@ int main()
 
                 if (clientMessage.disconnected)
                 {
-                    if (redPlayersCount == 0)
+                    printf("Test \n");
+                    printf("This guy left%s\n", shared->gameState.disconnectedPlayerNames[0]);
+                    for (int i = 0; i < shared->gameState.disconnectedPlayerCount; i++)
                     {
-                        shared->redShipCount = 0;
-                        shared->gameState.gamePhase = PHASE_GAME_OVER;
-                    }
-                    else if (bluePlayersCount == 0)
-                    {
-                        shared->blueShipCount = 0;
-                        shared->gameState.gamePhase = PHASE_GAME_OVER;
+                        for (int j = 0; j < playerCount; j++)
+                        {
+                            if (strcmp(playerQueue[j]->name, shared->gameState.disconnectedPlayerNames[i]) == 0)
+                            {
+                                playerQueue[j]->disconnected = true;
+                            }
+                        }
                     }
 
                     pthread_mutex_lock(&shared->turnStructLock);
-                    shared->threadTurn = SCHEDULER;
+                    shared->threadTurn = LOGGER;
                     pthread_cond_broadcast(&shared->turnStructCond);
                     pthread_mutex_unlock(&shared->turnStructLock);
                     continue;
@@ -1082,22 +1131,6 @@ int main()
             }
             else if (shared->gameState.gamePhase == PHASE_GAME_OVER)
             {
-
-                if (shared->blueShipCount == 0)
-                {
-                    shared->winningTeam = RED;
-                    memcpy(shared->winnerNames, shared->redTeamMembers, sizeof(shared->redTeamMembers));
-                }
-                else
-                {
-                    shared->winningTeam = BLUE;
-                    memcpy(shared->winnerNames, shared->blueTeamMembers, sizeof(shared->blueTeamMembers));
-                }
-                pthread_cond_broadcast(&shared->turnStructCond);
-                pthread_mutex_unlock(&shared->turnStructLock);
-
-                pthread_create(&scoreUpdater, NULL, updateScore, shared->winnerNames);
-
                 for (int i = 0; i < playerCount; i++)
                 {
                     int readPipe = pipes[playerQueue[i]->playerId][0];
@@ -1116,6 +1149,41 @@ int main()
                         continue;
                     }
                 }
+
+                gameEnd = true;
+
+                if (shared->allPlayersLeft)
+                {
+                    pthread_cond_broadcast(&shared->turnStructCond);
+                    pthread_mutex_unlock(&shared->turnStructLock);
+
+                    FILE *gameEndLog = fopen("game.log", "a");
+                    if (!gameEndLog)
+                    {
+                        printf("Error in opening log file\n");
+                        exit(0);
+                    }
+
+                    fprintf(gameEndLog, "All players left. No winners. TIE!");
+                    fflush(gameEndLog);
+                    fclose(gameEndLog);
+                    break;
+                }
+
+                if (shared->blueShipCount == 0)
+                {
+                    shared->winningTeam = RED;
+                    memcpy(shared->winnerNames, shared->redTeamMembers, sizeof(shared->redTeamMembers));
+                }
+                else
+                {
+                    shared->winningTeam = BLUE;
+                    memcpy(shared->winnerNames, shared->blueTeamMembers, sizeof(shared->blueTeamMembers));
+                }
+                pthread_cond_broadcast(&shared->turnStructCond);
+                pthread_mutex_unlock(&shared->turnStructLock);
+
+                pthread_create(&scoreUpdater, NULL, updateScore, shared->winnerNames);
 
                 FILE *gameEndLog = fopen("game.log", "a");
                 if (!gameEndLog)
@@ -1151,8 +1219,6 @@ int main()
             pthread_mutex_unlock(&shared->turnStructLock);
         }
 
-        // stop polling for disconnects
-        gameEnd = true;
         pthread_mutex_destroy(&lock);
         pthread_mutexattr_destroy(&turnStateLock);
         pthread_condattr_destroy(&turnStateCond);

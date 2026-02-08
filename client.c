@@ -318,12 +318,13 @@ void waitForTurn()
             exit(0);
         }
 
-        if (game_phase == PHASE_GAME_OVER)
-        {
-            break;
-        }
+        bool alive = true;
         // Blocking read: server sends current_turn when turn changes
         read(sockfd, &current_turn, sizeof(int));
+
+        if (game_phase == PHASE_GAME_OVER)
+            break;
+        write(sockfd, &alive, sizeof(bool));
         if (current_turn == my_player_id)
             break;
 
